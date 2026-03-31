@@ -1,0 +1,139 @@
+{
+  "name": "claude-lens",
+  "displayName": "Claude Lens",
+  "description": "Cost intelligence and efficiency coaching for Claude AI — budget caps, ROI scoring, billing reports. Local only, zero telemetry.",
+  "version": "0.1.0",
+  "publisher": "shouvikm2",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shouvikm2/claude-lens"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "claude",
+    "anthropic",
+    "ai",
+    "cost",
+    "budget",
+    "token",
+    "usage"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/src/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeLens",
+          "title": "Claude Lens",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudeLens": [
+        {
+          "id": "claudeLens.sidebar",
+          "name": "Claude Lens"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claudeLens.openHUD",
+        "title": "Open HUD",
+        "category": "Claude Lens"
+      },
+      {
+        "command": "claudeLens.generateReport",
+        "title": "Generate Report Now",
+        "category": "Claude Lens"
+      },
+      {
+        "command": "claudeLens.resetSession",
+        "title": "Reset Session",
+        "category": "Claude Lens"
+      },
+      {
+        "command": "claudeLens.clearHistory",
+        "title": "Clear Local History",
+        "category": "Claude Lens"
+      },
+      {
+        "command": "claudeLens.openConfig",
+        "title": "Edit .claudelens",
+        "category": "Claude Lens"
+      },
+      {
+        "command": "claudeLens.createConfig",
+        "title": "Create .claudelens",
+        "category": "Claude Lens"
+      },
+      {
+        "command": "claudeLens.openReportsFolder",
+        "title": "Open Reports Folder",
+        "category": "Claude Lens"
+      },
+      {
+        "command": "claudeLens.manualEntry",
+        "title": "Manual Token Entry",
+        "category": "Claude Lens"
+      },
+      {
+        "command": "claudeLens.setApiKey",
+        "title": "Set Anthropic API Key",
+        "category": "Claude Lens"
+      },
+      {
+        "command": "claudeLens.clearApiKey",
+        "title": "Clear Anthropic API Key",
+        "category": "Claude Lens"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Lens",
+      "properties": {
+        "claudeLens.priceOverrides": {
+          "type": "object",
+          "default": {},
+          "description": "Override per-model pricing. Keys are model IDs, values match ModelPricing shape."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src/",
+    "test": "node ./out/test/runTests.js"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.6",
+    "@types/node": "18.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vscode/test-electron": "^2.3.8",
+    "eslint": "^8.56.0",
+    "glob": "^11.0.0",
+    "mocha": "^11.0.0",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "zod": "^3.22.4"
+  },
+  "overrides": {
+    "serialize-javascript": "^7.0.5",
+    "diff": "^8.0.4"
+  }
+}

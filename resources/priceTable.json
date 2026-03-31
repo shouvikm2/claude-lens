@@ -1,0 +1,20 @@
+{
+  "claude-opus-4-6": {
+    "inputPerMillion": 15.00,
+    "outputPerMillion": 75.00,
+    "cacheWritePerMillion": 3.75,
+    "cacheReadPerMillion": 1.50
+  },
+  "claude-sonnet-4-6": {
+    "inputPerMillion": 3.00,
+    "outputPerMillion": 15.00,
+    "cacheWritePerMillion": 0.375,
+    "cacheReadPerMillion": 0.30
+  },
+  "claude-haiku-4-5-20251001": {
+    "inputPerMillion": 0.80,
+    "outputPerMillion": 4.00,
+    "cacheWritePerMillion": 0.10,
+    "cacheReadPerMillion": 0.08
+  }
+}
