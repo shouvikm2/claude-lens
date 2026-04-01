@@ -26,7 +26,7 @@ The sidebar shows:
 - **Session Detail** — token counts, cache, costs
 - **Config** — data source, model switcher, settings
 
-![Status Bar Demo](media/statusbar-demo.png)
+![Status Bar Demo](media/statusbar.png)
 
 The status bar displays: quota %, time until reset, and active model. Click to focus the sidebar.
 
@@ -35,8 +35,7 @@ The status bar displays: quota %, time until reset, and active model. Click to f
 **Data sources** (in priority order):
 1. **Claude Code logs** — most accurate, local JSONL files
 2. **Anthropic Usage API** — for workspace/API billing users (requires API key)
-3. **Manual entry** — fallback for claude.ai-only users
-4. **Plan Quota** — reads oauth token for real subscription %, polls every 5 min
+3. **Plan Quota** — reads oauth token for real subscription %, polls every 5 min
 
 **Real-time updates**:
 - Sidebar refreshes after each turn (rate-limited to 15s)
@@ -79,7 +78,7 @@ Claude Lens auto-discovers your active session. Sidebar and status bar update as
 
 **No API key required** for Claude Code users — token data comes from the local JSONL logs.
 
-> Not using Claude Code? Run `Claude Lens: Set Anthropic API Key` for API billing accounts, or `Claude Lens: Manual Token Entry` for claude.ai-only usage.
+> Not using Claude Code? Run `Claude Lens: Set Anthropic API Key` for Anthropic API/Workspace billing accounts to track API usage.
 
 ---
 
@@ -165,7 +164,6 @@ Safe to commit — contains no secrets.
 | `Clear Local History` | Wipe all stored session data from VS Code globalState |
 | `Edit .claudelens` | Open the config file in the editor |
 | `Create .claudelens` | Scaffold a new config at the workspace root |
-| `Manual Token Entry` | Enter token counts manually (for claude.ai-only users) |
 | `Set Anthropic API Key` | Store API key in SecretStorage for Usage API provider |
 | `Clear Anthropic API Key` | Remove stored API key |
 | `Switch Claude Code Model` | QuickPick to change active model (writes to `~/.claude/settings.json`) |
@@ -225,7 +223,7 @@ A: Claude Lens tracks the model active when each turn starts. If you switch in t
 A: Claude Code's JSONL file starts from when you opened the editor. Claude.ai's session window is server-managed and may have started at a different time. The Plan Quota "resets in" is authoritative.
 
 **Q: Can I use Claude Lens with claude.ai directly (not Claude Code)?**  
-A: Yes, with limitations. Set your Anthropic API key (for Usage API) or use Manual Token Entry. You'll see API cost estimates. Plan Quota requires the OAuth token from Claude Code.
+A: Yes, with limitations. Set your Anthropic API key for Anthropic API/Workspace billing accounts to see API cost estimates. Plan Quota requires the OAuth token (via Claude Code). claude.ai-only subscribers should use Plan Quota for their subscription usage.
 
 **Q: Does Claude Lens work offline?**  
 A: Claude Code logs are local — yes. Plan Quota and Anthropic Usage API require internet — no. Sidebar gracefully shows "Fetching usage..." if offline.

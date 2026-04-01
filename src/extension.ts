@@ -5,7 +5,6 @@ import { WorkspaceConfig } from './config/workspaceConfig.js';
 import { LocalStore } from './storage/localStore.js';
 import { ClaudeCodeProvider } from './providers/claudeCodeProvider.js';
 import { AnthropicUsageProvider } from './providers/anthropicUsageProvider.js';
-import { ManualProvider } from './providers/manualProvider.js';
 import { SessionTracker } from './core/sessionTracker.js';
 import { BudgetEngine } from './core/budgetEngine.js';
 import { scoreTurn, sessionSummary, type TurnScore } from './core/roiScorer.js';
@@ -19,7 +18,7 @@ import { log, disposeLogger } from './utils/logger.js';
 import { notifyTurnQuotaUsage } from './ui/notifications.js';
 import type { JournalEntry } from './providers/claudeCodeProvider.js';
 
-export type DataSource = 'claude-code-logs' | 'anthropic-api' | 'manual' | 'none';
+export type DataSource = 'claude-code-logs' | 'anthropic-api' | 'none';
 
 export function activate(context: vscode.ExtensionContext): void {
   log('Claude Lens activating');
@@ -189,7 +188,7 @@ export function activate(context: vscode.ExtensionContext): void {
   async function tryAnthropicApiProvider(): Promise<void> {
     const hasKey = await anthropicProvider.hasApiKey();
     if (!hasKey) {
-      log('No Anthropic API key — showing manual entry prompt');
+      log('No Anthropic API key — no API provider available');
       activeDataSource = 'none';
       refreshUI();
       return;
@@ -207,10 +206,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   }
 
-  // ── Provider 3: Manual entry ──────────────────────────────────────────────
-  const manualProvider = new ManualProvider(sessionTracker);
-
-  // ── Provider 4: Claude.ai plan limits (session % / weekly %) ─────────────
+  // ── Provider 3: Claude.ai plan limits (session % / weekly %) ──────────────
   // Reads ~/.claude/.credentials.json and calls api.anthropic.com/api/oauth/usage
   // to get real subscription usage — same numbers shown on claude.ai/settings.
   // Polls every 5 min (endpoint rate-limits aggressively at shorter intervals).
@@ -315,20 +311,31 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('claudeLens.openConfig', () => {
       const folders = vscode.workspace.workspaceFolders;
       if (!folders?.length) { vscode.window.showWarningMessage('Open a workspace folder first.'); return; }
-      void vscode.window.showTextDocument(
-        vscode.Uri.file(path.join(folders[0].uri.fsPath, '.claudelens'))
-      );
+      const workspaceRoot = folders[0].uri.fsPath;
+      const configPath = path.resolve(path.join(workspaceRoot, '.claudelens'));
+      const resolvedRoot = path.resolve(workspaceRoot);
+      if (!configPath.startsWith(resolvedRoot + path.sep) && configPath !== resolvedRoot) {
+        vscode.window.showErrorMessage('Invalid config path.');
+        return;
+      }
+      void vscode.window.showTextDocument(vscode.Uri.file(configPath));
     }),
 
     vscode.commands.registerCommand('claudeLens.createConfig', async () => {
       const folders = vscode.workspace.workspaceFolders;
       if (!folders?.length) { vscode.window.showWarningMessage('Open a workspace folder first.'); return; }
-      const configPath = path.join(folders[0].uri.fsPath, '.claudelens');
+      const workspaceRoot = folders[0].uri.fsPath;
+      const configPath = path.resolve(path.join(workspaceRoot, '.claudelens'));
+      const resolvedRoot = path.resolve(workspaceRoot);
+      if (!configPath.startsWith(resolvedRoot + path.sep) && configPath !== resolvedRoot) {
+        vscode.window.showErrorMessage('Invalid config path.');
+        return;
+      }
       if (fs.existsSync(configPath)) {
         void vscode.window.showTextDocument(vscode.Uri.file(configPath)); return;
       }
       const template = JSON.stringify({
-        version: '1.0', project: path.basename(folders[0].uri.fsPath),
+        version: '1.0', project: path.basename(workspaceRoot),
         budget: { session: 0.5, daily: 2.0, weekly: 10.0, currency: 'USD' },
         alerts: { soft_threshold: 0.8, hard_stop: false, notify_on_reset: true },
         model_roi: { enabled: true, preferred_model: 'sonnet', nudge_on_overkill: true, nudge_cooldown_min: 10 },
@@ -336,10 +343,6 @@ export function activate(context: vscode.ExtensionContext): void {
       fs.writeFileSync(configPath, template, 'utf-8');
       sidebarProvider.setConfigFileExists(true);
       void vscode.window.showTextDocument(vscode.Uri.file(configPath));
-    }),
-
-    vscode.commands.registerCommand('claudeLens.manualEntry', () => {
-      void manualProvider.promptManualEntry();
     }),
 
     // Store API key in SecretStorage — never in plaintext, never in settings

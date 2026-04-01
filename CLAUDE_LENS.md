@@ -60,11 +60,11 @@ Solo developers on paid Claude plans (Pro, Max5, Max20) who want financial visib
 │                    VS Code Extension Host                │
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
-│  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐  │
-│  │ claudeCode  │  │    manual    │  │  workspaceConf│  │
-│  │  Provider   │  │   Provider   │  │  ig (.clens)  │  │
-│  └──────┬──────┘  └──────┬───────┘  └───────┬───────┘  │
-│         └────────────────┴──────────────────┘           │
+│  ┌─────────────┐  ┌───────────────┐  │
+│  │ claudeCode  │  │  workspaceConf│  │
+│  │  Provider   │  │  ig (.clens)  │  │
+│  └──────┬──────┘  └───────┬───────┘  │
+│         └────────────────┘           │
 │                          │                              │
 │                  ┌───────▼────────┐                     │
 │                  │ sessionTracker │                     │
@@ -130,7 +130,8 @@ claude-lens/
 │   │   └── schema.ts                   # Config validation (Zod)
 │   ├── providers/
 │   │   ├── claudeCodeProvider.ts       # JSONL log reader + fs.watch
-│   │   └── manualProvider.ts           # Fallback: user inputs tokens
+│   │   ├── anthropicUsageProvider.ts   # Anthropic Usage API consumer
+│   │   └── claudeAiLimitsProvider.ts   # Plan Quota fetcher
 │   ├── ui/
 │   │   ├── statusBar.ts                # Bottom strip — always visible
 │   │   ├── sidebarPanel.ts             # TreeView — full breakdown
@@ -278,10 +279,6 @@ watcher.onDidCreate(uri => provider.load(uri));
 ```
 
 **Session window:** Claude Code uses 5-hour rolling sessions. Budget engine must respect this boundary. A new session starts a new cost accumulation window.
-
-### Fallback — Manual Provider
-
-When Claude Code logs are not found (user is on claude.ai only, or API direct), show a compact input form in the sidebar allowing manual token entry. All math stays the same.
 
 ### Storage — VS Code globalState Only
 

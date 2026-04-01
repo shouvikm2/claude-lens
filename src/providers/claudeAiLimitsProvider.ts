@@ -29,6 +29,8 @@ export class ClaudeAiLimitsProvider {
   private creds:     CredentialFile | undefined;
   private pollTimer: NodeJS.Timeout | undefined;
   private lastData:  PlanLimits | undefined;
+  private lastCredsFetch = 0;
+  private readonly CREDS_CACHE_TTL_MS = 5 * 60 * 1000;  // 5 minutes
 
   // ── Load credentials from ~/.claude/.credentials.json ────────────────────
 
@@ -41,6 +43,7 @@ export class ClaudeAiLimitsProvider {
     try {
       const raw = fs.readFileSync(credPath, 'utf-8');
       this.creds = JSON.parse(raw) as CredentialFile;
+      this.lastCredsFetch = Date.now();
       const ok = !!this.creds.claudeAiOauth?.accessToken;
       log(`ClaudeAiLimitsProvider: credentials loaded — ok=${ok}`);
       return ok;
@@ -53,10 +56,13 @@ export class ClaudeAiLimitsProvider {
   // ── Fetch limits ──────────────────────────────────────────────────────────
 
   async fetchLimits(): Promise<PlanLimits | undefined> {
-    // Re-read credentials fresh every fetch — Claude Code auto-refreshes
-    // the OAuth token and overwrites .credentials.json, so the in-memory
-    // copy becomes stale within ~1 hour.
-    await this.load();
+    // Only re-read credentials from disk if cache expired.
+    // Claude Code updates token ~hourly, so 5-min cache is safe while
+    // significantly reducing plaintext filesystem accesses.
+    const now = Date.now();
+    if (now - this.lastCredsFetch > this.CREDS_CACHE_TTL_MS) {
+      await this.load();
+    }
     if (!this.creds?.claudeAiOauth?.accessToken) return undefined;
 
     const token   = this.creds.claudeAiOauth.accessToken;
@@ -186,6 +192,8 @@ export class ClaudeAiLimitsProvider {
 
   private get(urlPath: string, token: string): Promise<unknown> {
     return new Promise((resolve, reject) => {
+      let timedOut = false;
+
       const req = https.request(
         {
           hostname: 'api.anthropic.com',
@@ -199,9 +207,15 @@ export class ClaudeAiLimitsProvider {
           },
         },
         res => {
+          if (timedOut) return;
+
           let raw = '';
-          res.on('data', (chunk: Buffer) => raw += chunk.toString());
+          res.on('data', (chunk: Buffer) => {
+            if (!timedOut) raw += chunk.toString();
+          });
           res.on('end', () => {
+            if (timedOut) return;
+
             if (!res.statusCode || res.statusCode >= 400) {
               reject(new Error(`HTTP ${res.statusCode ?? '?'}: ${raw.slice(0, 200)}`));
               return;
@@ -211,7 +225,21 @@ export class ClaudeAiLimitsProvider {
           });
         }
       );
-      req.on('error', reject);
+
+      req.on('error', err => {
+        if (!timedOut) reject(err);
+      });
+
+      const timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        req.destroy(new Error('OAuth usage API request timed out'));
+        reject(new Error('OAuth usage API request timed out'));
+      }, 10_000);
+
+      req.on('close', () => {
+        clearTimeout(timeoutHandle);
+      });
+
       req.end();
     });
   }

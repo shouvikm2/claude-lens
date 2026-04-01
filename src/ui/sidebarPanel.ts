@@ -237,7 +237,6 @@ setConfigFileExists(exists: boolean): void {
     const sourceLabels: Record<DataSource, string> = {
       'claude-code-logs': '✓ Claude Code logs (local, exact)',
       'anthropic-api':    '✓ Anthropic Usage API',
-      'manual':           '⚠ Manual entry',
       'none':             '✗ No data source — Claude Code not detected',
     };
 
