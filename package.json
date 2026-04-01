@@ -2,7 +2,7 @@
   "name": "claude-lens",
   "displayName": "Claude Lens",
   "description": "Real-time Claude usage intelligence for VS Code — plan quotas, budget caps, ROI scoring, model switching. Local only, zero telemetry.",
-  "version": "1.0.8",
+  "version": "1.1.1",
   "publisher": "shouvikm",
   "license": "MIT",
   "icon": "media/icon.png",

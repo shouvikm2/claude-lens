@@ -20,6 +20,38 @@ import type { JournalEntry } from './providers/claudeCodeProvider.js';
 
 export type DataSource = 'claude-code-logs' | 'anthropic-api' | 'none';
 
+/**
+ * Validates that a requested file path is within the workspace root.
+ * Uses fs.realpath to resolve symlinks and prevent symlink-based escapes.
+ */
+async function validateWorkspaceFilePath(workspaceRoot: string, requestedPath: string): Promise<boolean> {
+  try {
+    // Resolve both paths through symlinks
+    const realRoot = await fs.promises.realpath(workspaceRoot);
+
+    // For new files that don't exist yet, resolve parent directory instead
+    let realPath: string;
+    try {
+      realPath = await fs.promises.realpath(requestedPath);
+    } catch (err) {
+      if ((err as any).code === 'ENOENT') {
+        // File doesn't exist; resolve parent directory
+        const parent = path.dirname(requestedPath);
+        realPath = await fs.promises.realpath(parent);
+        realPath = path.join(realPath, path.basename(requestedPath));
+      } else {
+        throw err;
+      }
+    }
+
+    // Ensure the real path is within workspace (or equals workspace root)
+    return realPath === realRoot || realPath.startsWith(realRoot + path.sep);
+  } catch (err) {
+    log(`Path validation failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   log('Claude Lens activating');
 
@@ -163,16 +195,24 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   void (async () => {
-    const sessionDir = await claudeProvider.discoverSessionDir();
-    if (sessionDir) {
-      activeDataSource = 'claude-code-logs';
-      await claudeProvider.loadCurrentSession(sessionDir);
-      claudeProvider.startWatching(sessionDir);
-      log(`Claude Code provider active — data from ${sessionDir}`);
-      refreshUI();
-    } else {
-      log('Claude Code logs not found — checking for Anthropic API key');
-      await tryAnthropicApiProvider();
+    try {
+      const sessionDir = await claudeProvider.discoverSessionDir();
+      if (sessionDir) {
+        activeDataSource = 'claude-code-logs';
+        await claudeProvider.loadCurrentSession(sessionDir);
+        claudeProvider.startWatching(sessionDir);
+        log(`Claude Code provider active — data from ${sessionDir}`);
+        refreshUI();
+      } else {
+        log('Claude Code logs not found — checking for Anthropic API key');
+        await tryAnthropicApiProvider();
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log(`[ERROR] Provider initialization failed: ${msg}`);
+      vscode.window.showWarningMessage(
+        '⬡ Claude Lens: Initialization warning — some data sources may be unavailable. Check the output channel.'
+      );
     }
   })();
 
@@ -217,6 +257,7 @@ export function activate(context: vscode.ExtensionContext): void {
   void limitsProvider.load().then(ok => {
     if (!ok) {
       log('ClaudeAiLimitsProvider: credentials not available');
+      sidebarProvider.updatePlanLimits(null, limitsProvider.getLastError());
       return;
     }
     // Seed the sidebar with subscription type immediately from credentials
@@ -229,7 +270,7 @@ export function activate(context: vscode.ExtensionContext): void {
       statusBar.updateLimits(seed);
     }
     limitsProvider.startPolling(limits => {
-      sidebarProvider.updatePlanLimits(limits);
+      sidebarProvider.updatePlanLimits(limits, limitsProvider.getLastError());
       statusBar.updateLimits(limits);
       if (!limits?.session) return;
 
@@ -270,14 +311,31 @@ export function activate(context: vscode.ExtensionContext): void {
         lastSessionAlertPct = 0;
       }
     }, 300_000);
+  }).catch(err => {
+    const msg = err instanceof Error ? err.message : String(err);
+    log(`[ERROR] ClaudeAiLimitsProvider initialization failed: ${msg}`);
   });
 
   // ── Workspace config ──────────────────────────────────────────────────────
 
-  void workspaceConfig.load().then(config => {
-    const root = workspaceRoot();
-    sidebarProvider.setConfigFileExists(!!root && fs.existsSync(path.join(root, '.claudelens')));
-    log(`Config loaded — project: "${config.project}"`);
+  void workspaceConfig.load().then(async config => {
+    try {
+      const root = workspaceRoot();
+      let configExists = false;
+      if (root) {
+        try {
+          await fs.promises.access(path.join(root, '.claudelens'), fs.constants.R_OK);
+          configExists = true;
+        } catch {
+          // Expected: config file may not exist yet; that's fine
+        }
+      }
+      sidebarProvider.setConfigFileExists(configExists);
+      log(`Config loaded — project: "${config.project}"`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log(`[ERROR] Config initialization failed: ${msg}`);
+    }
   });
 
   // ── Commands ──────────────────────────────────────────────────────────────
@@ -308,14 +366,19 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
 
-    vscode.commands.registerCommand('claudeLens.openConfig', () => {
+    vscode.commands.registerCommand('claudeLens.openConfig', async () => {
       const folders = vscode.workspace.workspaceFolders;
       if (!folders?.length) { vscode.window.showWarningMessage('Open a workspace folder first.'); return; }
       const workspaceRoot = folders[0].uri.fsPath;
-      const configPath = path.resolve(path.join(workspaceRoot, '.claudelens'));
-      const resolvedRoot = path.resolve(workspaceRoot);
-      if (!configPath.startsWith(resolvedRoot + path.sep) && configPath !== resolvedRoot) {
-        vscode.window.showErrorMessage('Invalid config path.');
+      const configPath = path.join(workspaceRoot, '.claudelens');
+      try {
+        if (!(await validateWorkspaceFilePath(workspaceRoot, configPath))) {
+          vscode.window.showErrorMessage('Invalid config path — must be within workspace.');
+          return;
+        }
+      } catch (err) {
+        log(`Path validation error: ${err instanceof Error ? err.message : String(err)}`);
+        vscode.window.showErrorMessage('Could not validate config path.');
         return;
       }
       void vscode.window.showTextDocument(vscode.Uri.file(configPath));
@@ -325,22 +388,28 @@ export function activate(context: vscode.ExtensionContext): void {
       const folders = vscode.workspace.workspaceFolders;
       if (!folders?.length) { vscode.window.showWarningMessage('Open a workspace folder first.'); return; }
       const workspaceRoot = folders[0].uri.fsPath;
-      const configPath = path.resolve(path.join(workspaceRoot, '.claudelens'));
-      const resolvedRoot = path.resolve(workspaceRoot);
-      if (!configPath.startsWith(resolvedRoot + path.sep) && configPath !== resolvedRoot) {
-        vscode.window.showErrorMessage('Invalid config path.');
+      const configPath = path.join(workspaceRoot, '.claudelens');
+      try {
+        if (!(await validateWorkspaceFilePath(workspaceRoot, configPath))) {
+          vscode.window.showErrorMessage('Invalid config path — must be within workspace.');
+          return;
+        }
+      } catch (err) {
+        log(`Path validation error: ${err instanceof Error ? err.message : String(err)}`);
+        vscode.window.showErrorMessage('Could not validate config path.');
         return;
       }
-      if (fs.existsSync(configPath)) {
+      try {
+        await fs.promises.access(configPath, fs.constants.R_OK);
         void vscode.window.showTextDocument(vscode.Uri.file(configPath)); return;
-      }
+      } catch { /* file doesn't exist — create it */ }
       const template = JSON.stringify({
         version: '1.0', project: path.basename(workspaceRoot),
         budget: { session: 0.5, daily: 2.0, weekly: 10.0, currency: 'USD' },
         alerts: { soft_threshold: 0.8, hard_stop: false, notify_on_reset: true },
         model_roi: { enabled: true, preferred_model: 'sonnet', nudge_on_overkill: true, nudge_cooldown_min: 10 },
       }, null, 2);
-      fs.writeFileSync(configPath, template, 'utf-8');
+      await fs.promises.writeFile(configPath, template, 'utf-8');
       sidebarProvider.setConfigFileExists(true);
       void vscode.window.showTextDocument(vscode.Uri.file(configPath));
     }),

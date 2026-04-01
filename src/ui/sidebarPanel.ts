@@ -28,9 +28,20 @@ export class SidebarProvider implements vscode.TreeDataProvider<LensItem> {
   private config:     ClensConfig  | undefined;
   private roi:        RoiSummary   | undefined;
   private planLimits: PlanLimits | null | undefined;  // undefined=loading, null=failed, PlanLimits=ok
+  private planError: string | undefined;
 
   private configFileExists = false;
   private dataSource: DataSource = 'none';
+
+  // Debounce tree refreshes — multiple rapid state changes collapse into one render
+  private refreshTimer: NodeJS.Timeout | undefined;
+  private scheduleRefresh(): void {
+    if (this.refreshTimer) return;  // already scheduled
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = undefined;
+      this.changeEmitter.fire(undefined);
+    }, 100);
+  }
 
   update(session: SessionState, budget: BudgetReport, config: ClensConfig, roi: RoiSummary, dataSource: DataSource): void {
     this.session    = session;
@@ -38,19 +49,20 @@ export class SidebarProvider implements vscode.TreeDataProvider<LensItem> {
     this.config     = config;
     this.roi        = roi;
     this.dataSource = dataSource;
-    this.changeEmitter.fire(undefined);
+    this.scheduleRefresh();
   }
 
-  refresh(): void { this.changeEmitter.fire(undefined); }
+  refresh(): void { this.scheduleRefresh(); }
 
-  updatePlanLimits(limits: PlanLimits | null): void {
+  updatePlanLimits(limits: PlanLimits | null, error?: string): void {
     this.planLimits = limits;
-    this.changeEmitter.fire(undefined);
+    this.planError = error;
+    this.scheduleRefresh();
   }
 
-setConfigFileExists(exists: boolean): void {
+  setConfigFileExists(exists: boolean): void {
     this.configFileExists = exists;
-    this.changeEmitter.fire(undefined);
+    this.scheduleRefresh();
   }
 
   getTreeItem(element: LensItem): vscode.TreeItem { return element; }
@@ -126,10 +138,14 @@ setConfigFileExists(exists: boolean): void {
       children.push(link);
       root.children = children;
     } else {
-      const msg = lim === undefined
-        ? this.leaf('Fetching usage from claude.ai…')
-        : this.leaf('Could not load — check Output > Claude Lens');
-      root.children = [msg, link];
+      if (lim === undefined) {
+        root.children = [this.leaf('Fetching usage from claude.ai…'), link];
+      } else {
+        const detail = this.planError
+          ? this.leaf(`Could not load — ${this.planError}`)
+          : this.leaf('Could not load — check Output > Claude Lens');
+        root.children = [detail, link];
+      }
     }
 
     return root;
@@ -289,6 +305,7 @@ setConfigFileExists(exists: boolean): void {
   }
 
   dispose(): void {
+    if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.changeEmitter.dispose();
   }
 }

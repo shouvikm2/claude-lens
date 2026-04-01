@@ -3,6 +3,7 @@ import * as https from 'https';
 import * as os from 'os';
 import * as path from 'path';
 import { log } from '../utils/logger.js';
+import { sanitizeSensitiveData } from '../utils/sanitize.js';
 
 export interface SessionLimit {
   pctUsed:  number;   // 0–1
@@ -29,6 +30,7 @@ export class ClaudeAiLimitsProvider {
   private creds:     CredentialFile | undefined;
   private pollTimer: NodeJS.Timeout | undefined;
   private lastData:  PlanLimits | undefined;
+  private lastError: string | undefined;
   private lastCredsFetch = 0;
   private readonly CREDS_CACHE_TTL_MS = 5 * 60 * 1000;  // 5 minutes
 
@@ -36,20 +38,48 @@ export class ClaudeAiLimitsProvider {
 
   async load(): Promise<boolean> {
     const credPath = path.join(os.homedir(), '.claude', '.credentials.json');
-    if (!fs.existsSync(credPath)) {
+    try {
+      await fs.promises.access(credPath, fs.constants.R_OK);
+    } catch {
       log('ClaudeAiLimitsProvider: .credentials.json not found');
+      this.lastError = 'credentials file not found (~/.claude/.credentials.json)';
       return false;
     }
+
+    // Check file permissions (warn if overly permissive)
+    await this.checkCredentialsFilePermissions(credPath);
+
     try {
-      const raw = fs.readFileSync(credPath, 'utf-8');
+      const raw = await fs.promises.readFile(credPath, 'utf-8');
       this.creds = JSON.parse(raw) as CredentialFile;
       this.lastCredsFetch = Date.now();
       const ok = !!this.creds.claudeAiOauth?.accessToken;
       log(`ClaudeAiLimitsProvider: credentials loaded — ok=${ok}`);
+      if (!ok) this.lastError = 'No OAuth access token in credentials file';
       return ok;
     } catch (e) {
-      log(`ClaudeAiLimitsProvider: failed to read credentials — ${e}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      this.lastError = `Failed to read credentials: ${msg}`;
+      log(`ClaudeAiLimitsProvider: failed to read credentials — ${msg}`);
       return false;
+    }
+  }
+
+  private async checkCredentialsFilePermissions(credPath: string): Promise<void> {
+    try {
+      const stat = await fs.promises.stat(credPath);
+      // On Unix/Linux: file mode should be 0o600 (user read/write only)
+      // File permissions: mode & 0o777 extracts the permission bits
+      // We check if group/other have any permissions: (mode & 0o077) should be 0
+      const mode = stat.mode & 0o777;
+      const hasGroupOrOtherPerms = (mode & 0o077) !== 0;
+
+      if (hasGroupOrOtherPerms) {
+        log(`[WARNING] Credentials file has overly permissive permissions (${mode.toString(8)}). ` +
+            `Recommended: chmod 600 ~/.claude/.credentials.json`);
+      }
+    } catch {
+      // Silently ignore on Windows or if stat fails (can't check permissions reliably)
     }
   }
 
@@ -76,20 +106,25 @@ export class ClaudeAiLimitsProvider {
     try {
       log(`ClaudeAiLimitsProvider: GET https://api.anthropic.com${urlPath}`);
       const body = await this.get(urlPath, token);
-      log(`ClaudeAiLimitsProvider: response: ${JSON.stringify(body)}`);
+      log(`ClaudeAiLimitsProvider: response: ${JSON.stringify(sanitizeSensitiveData(body))}`);
       const parsed = this.parseLimits(body, subType);
       if (parsed) {
         this.lastData = parsed;
+        this.lastError = undefined;
         return parsed;
       }
+      this.lastError = 'Unexpected response shape from claude.ai';
       log('ClaudeAiLimitsProvider: response shape not recognised');
     } catch (e) {
-      log(`ClaudeAiLimitsProvider: request failed — ${e}`);
+      const msg = e instanceof Error ? e.message : String(e);
+      this.lastError = msg;
+      log(`ClaudeAiLimitsProvider: request failed — ${msg}`);
     }
     return undefined;
   }
 
   getLastData(): PlanLimits | undefined { return this.lastData; }
+  getLastError(): string | undefined { return this.lastError; }
 
   // Called externally when a turn completes so quota updates immediately
   // rather than waiting for the next poll. Respects a minimum gap to avoid
@@ -117,24 +152,27 @@ export class ClaudeAiLimitsProvider {
     this.onChange = onChange;
     let failCount = 0;
 
+    const schedule = (delayMs: number) => {
+      this.pollTimer = setTimeout(() => void tick(), delayMs);
+    };
+
     const tick = async () => {
       this.lastRefreshAt = Date.now();
       const data = await this.fetchLimits();
       if (data) {
         failCount = 0;
         onChange(data);
+        schedule(intervalMs);
       } else {
         failCount++;
         onChange(null);
         // On failure, retry at 30s up to 3 times before settling into normal cadence
-        if (failCount <= 3) {
-          setTimeout(() => void tick(), 30_000);
-        }
+        schedule(failCount <= 3 ? 30_000 : intervalMs);
       }
     };
 
-    void tick();
-    this.pollTimer = setInterval(() => void tick(), intervalMs);
+    // Schedule the first tick immediately (setImmediate equivalent) so pollTimer is set synchronously
+    schedule(0);
   }
 
   // ── Response parser ───────────────────────────────────────────────────────
@@ -192,7 +230,12 @@ export class ClaudeAiLimitsProvider {
 
   private get(urlPath: string, token: string): Promise<unknown> {
     return new Promise((resolve, reject) => {
-      let timedOut = false;
+      let settled = false;
+      let timeoutHandle: NodeJS.Timeout | undefined;
+
+      const cleanup = () => {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+      };
 
       const req = https.request(
         {
@@ -207,14 +250,16 @@ export class ClaudeAiLimitsProvider {
           },
         },
         res => {
-          if (timedOut) return;
+          if (settled) return;
 
           let raw = '';
           res.on('data', (chunk: Buffer) => {
-            if (!timedOut) raw += chunk.toString();
+            if (!settled) raw += chunk.toString();
           });
           res.on('end', () => {
-            if (timedOut) return;
+            if (settled) return;
+            settled = true;
+            cleanup();
 
             if (!res.statusCode || res.statusCode >= 400) {
               reject(new Error(`HTTP ${res.statusCode ?? '?'}: ${raw.slice(0, 200)}`));
@@ -227,17 +272,26 @@ export class ClaudeAiLimitsProvider {
       );
 
       req.on('error', err => {
-        if (!timedOut) reject(err);
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(err);
+        }
       });
 
-      const timeoutHandle = setTimeout(() => {
-        timedOut = true;
-        req.destroy(new Error('OAuth usage API request timed out'));
-        reject(new Error('OAuth usage API request timed out'));
-      }, 10_000);
+      // Increased timeout from 10s to 30s. The endpoint is rate-limited,
+      // and aggressive timeouts cause retries that trigger the rate limit.
+      // 30s provides a reasonable grace period for legitimate requests.
+      timeoutHandle = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          req.destroy(new Error('HTTP request timeout (30s)'));
+        }
+      }, 30_000);
 
       req.on('close', () => {
-        clearTimeout(timeoutHandle);
+        cleanup();
       });
 
       req.end();
@@ -245,6 +299,6 @@ export class ClaudeAiLimitsProvider {
   }
 
   dispose(): void {
-    if (this.pollTimer) clearInterval(this.pollTimer);
+    if (this.pollTimer) clearTimeout(this.pollTimer);
   }
 }

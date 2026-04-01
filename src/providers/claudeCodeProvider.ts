@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import { promises as fsPromises } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { log, logError } from '../utils/logger.js';
@@ -57,7 +58,9 @@ export class ClaudeCodeProvider {
 
   async discoverSessionDir(): Promise<string | undefined> {
     const claudeDir = path.join(os.homedir(), '.claude', 'projects');
-    if (!fs.existsSync(claudeDir)) {
+    try {
+      await fs.promises.access(claudeDir, fs.constants.R_OK);
+    } catch {
       log('~/.claude/projects not found — Claude Code logs unavailable');
       return undefined;
     }
@@ -155,28 +158,50 @@ export class ClaudeCodeProvider {
 
   private async tailAsync(filePath: string): Promise<void> {
     const lastOffset = this.fileOffsets.get(filePath) ?? 0;
+    let fd: fsPromises.FileHandle | undefined;
+
     try {
-      const stat = await fs.promises.stat(filePath);
-      if (stat.size <= lastOffset) return;
+      // Open file first, then check size to minimize TOCTOU window
+      fd = await fs.promises.open(filePath, 'r');
 
-      const fd = await fs.promises.open(filePath, 'r');
-      const length = stat.size - lastOffset;
-      const buf = Buffer.alloc(length);
-      await fd.read(buf, 0, length, lastOffset);
-      await fd.close();
-      this.fileOffsets.set(filePath, stat.size);
+      try {
+        const stat = await fd.stat();
 
-      const newEntries = buf.toString('utf-8')
-        .split('\n')
-        .filter(l => l.trim())
-        .map(l => this.parseLine(l))
-        .filter((e): e is JournalEntry => e !== undefined);
+        // Handle file truncation: file smaller than last known offset
+        if (stat.size < lastOffset) {
+          log(`File ${path.basename(filePath)} was truncated (offset ${lastOffset} → size ${stat.size})`);
+          this.fileOffsets.set(filePath, stat.size);
+          return;
+        }
 
-      for (const entry of newEntries) {
-        this.onEntryCallback?.(entry);
-      }
-      if (newEntries.length > 0) {
-        log(`Tailed ${newEntries.length} new entries from ${path.basename(filePath)}`);
+        if (stat.size <= lastOffset) return;
+
+        const length = stat.size - lastOffset;
+        const buf = Buffer.alloc(length);
+        const result = await fd.read(buf, 0, length, lastOffset);
+
+        // Validate actual bytes read
+        if (result.bytesRead < length) {
+          log(`Partial read from ${path.basename(filePath)}: expected ${length}, got ${result.bytesRead}`);
+        }
+
+        // Update offset with actual bytes read, not expected
+        this.fileOffsets.set(filePath, lastOffset + result.bytesRead);
+
+        const newEntries = buf.slice(0, result.bytesRead).toString('utf-8')
+          .split('\n')
+          .filter(l => l.trim())
+          .map(l => this.parseLine(l))
+          .filter((e): e is JournalEntry => e !== undefined);
+
+        for (const entry of newEntries) {
+          this.onEntryCallback?.(entry);
+        }
+        if (newEntries.length > 0) {
+          log(`Tailed ${newEntries.length} new entries from ${path.basename(filePath)}`);
+        }
+      } finally {
+        await fd.close();
       }
     } catch (err) {
       logError(`Failed to tail ${filePath}`, err);
@@ -227,7 +252,7 @@ export class ClaudeCodeProvider {
     const byContent = await this.findDirByContentAsync(claudeDir, workspacePath);
     if (byContent) { log(`Session dir matched by content: ${byContent}`); return byContent; }
 
-    const byName = this.findDirByName(claudeDir, workspacePath);
+    const byName = await this.findDirByNameAsync(claudeDir, workspacePath);
     if (byName) { log(`Session dir matched by name: ${byName}`); return byName; }
 
     const fallback = await this.mostRecentProjectDirAsync(claudeDir);
@@ -252,7 +277,10 @@ export class ClaudeCodeProvider {
           if (await this.fileContainsCwdAsync(jf, normalized)) return dirPath;
         }
       }
-    } catch { /* ignore */ }
+    } catch {
+      // Expected: directory structure may not exist or be accessible
+      // This is a best-effort search; failures are handled by fallback methods
+    }
     return undefined;
   }
 
@@ -269,13 +297,17 @@ export class ClaudeCodeProvider {
           const obj = JSON.parse(line) as Record<string, unknown>;
           const cwd = (obj['cwd'] as string | undefined)?.replace(/\\/g, '/').toLowerCase();
           if (cwd && (cwd === normalizedCwd || cwd.startsWith(normalizedCwd))) return true;
-        } catch { /* malformed line */ }
+        } catch {
+          // Expected: some lines may be malformed; skip and continue scanning
+        }
       }
-    } catch { /* unreadable */ }
+    } catch {
+      // Expected: file may be unreadable, inaccessible, or deleted; caller handles failure
+    }
     return false;
   }
 
-  private findDirByName(claudeDir: string, workspacePath: string): string | undefined {
+  private async findDirByNameAsync(claudeDir: string, workspacePath: string): Promise<string | undefined> {
     const normalized = workspacePath.replace(/\\/g, '/');
     const candidates = new Set<string>([
       normalized.replace(/[^a-zA-Z0-9-]/g, '-'),
@@ -284,7 +316,10 @@ export class ClaudeCodeProvider {
     for (const c of [...candidates]) candidates.add(c.toLowerCase());
 
     try {
-      for (const { name } of fs.readdirSync(claudeDir, { withFileTypes: true }).filter(e => e.isDirectory())) {
+      const dirEntries = await fs.promises.readdir(claudeDir, { withFileTypes: true });
+      for (const entry of dirEntries) {
+        if (!entry.isDirectory()) continue;
+        const { name } = entry;
         if (candidates.has(name) || candidates.has(name.toLowerCase())) {
           return path.join(claudeDir, name);
         }
@@ -292,7 +327,9 @@ export class ClaudeCodeProvider {
           if (name.endsWith(c) || c.endsWith(name)) return path.join(claudeDir, name);
         }
       }
-    } catch { /* ignore */ }
+    } catch {
+      // Expected: directory may not exist or be readable; caller has fallback
+    }
     return undefined;
   }
 
@@ -311,7 +348,10 @@ export class ClaudeCodeProvider {
 
       dirsWithMtime.sort((a, b) => b.mtime - a.mtime);
       return dirsWithMtime[0]?.dirPath;
-    } catch { return undefined; }
+    } catch {
+      // Expected: directory may not exist; caller has fallback
+      return undefined;
+    }
   }
 
   private async readAllLinesAsync(filePath: string): Promise<JournalEntry[]> {
