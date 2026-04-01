@@ -61,7 +61,7 @@ export class ClaudeCodeProvider {
       log('~/.claude/projects not found — Claude Code logs unavailable');
       return undefined;
     }
-    return this.resolveSessionDir(claudeDir);
+    return this.resolveSessionDirAsync(claudeDir);
   }
 
   /**
@@ -69,7 +69,7 @@ export class ClaudeCodeProvider {
    * We do not load historical files into live state — each file is one session.
    */
   async loadCurrentSession(sessionDir: string): Promise<void> {
-    const latest = this.findLatestJsonl(sessionDir);
+    const latest = await this.findLatestJsonlAsync(sessionDir);
     if (!latest) {
       log('No JSONL session files found');
       return;
@@ -88,7 +88,7 @@ export class ClaudeCodeProvider {
     const watcher = vscode.workspace.createFileSystemWatcher(
       new vscode.RelativePattern(vscode.Uri.file(sessionDir), '*.jsonl')
     );
-    watcher.onDidChange(u => this.tail(u.fsPath));
+    watcher.onDidChange(u => void this.tailAsync(u.fsPath));
     watcher.onDidCreate(u => void this.handleNewFile(u.fsPath));
     this.watchers.push(watcher);
   }
@@ -102,17 +102,18 @@ export class ClaudeCodeProvider {
   // ── Polling ────────────────────────────────────────────────────────────────
 
   private pollAll(sessionDir: string): void {
-    // Tail the current session file for new lines
+    // Tail the current session file for new lines (async, non-blocking)
     if (this.currentFile) {
-      this.tail(this.currentFile);
+      void this.tailAsync(this.currentFile);
     }
 
     // Check whether Claude Code started a NEW session (new JSONL file)
-    const latest = this.findLatestJsonl(sessionDir);
-    if (latest && latest !== this.currentFile) {
-      log(`New session file detected: ${path.basename(latest)}`);
-      void this.handleNewFile(latest);
-    }
+    void this.findLatestJsonlAsync(sessionDir).then(latest => {
+      if (latest && latest !== this.currentFile) {
+        log(`New session file detected: ${path.basename(latest)}`);
+        void this.handleNewFile(latest);
+      }
+    });
   }
 
   private async handleNewFile(filePath: string): Promise<void> {
@@ -130,8 +131,9 @@ export class ClaudeCodeProvider {
 
   private async loadFile(filePath: string, announceStart: boolean): Promise<void> {
     try {
-      const entries = this.readAllLines(filePath);
-      this.fileOffsets.set(filePath, fs.statSync(filePath).size);
+      const entries = await this.readAllLinesAsync(filePath);
+      const stat = await fs.promises.stat(filePath);
+      this.fileOffsets.set(filePath, stat.size);
 
       // Extract the real session start time from the first entry's timestamp.
       // This is what drives the 5-hour window — not our extension activation time.
@@ -151,17 +153,17 @@ export class ClaudeCodeProvider {
     }
   }
 
-  private tail(filePath: string): void {
+  private async tailAsync(filePath: string): Promise<void> {
     const lastOffset = this.fileOffsets.get(filePath) ?? 0;
     try {
-      const stat = fs.statSync(filePath);
+      const stat = await fs.promises.stat(filePath);
       if (stat.size <= lastOffset) return;
 
-      const fd = fs.openSync(filePath, 'r');
+      const fd = await fs.promises.open(filePath, 'r');
       const length = stat.size - lastOffset;
       const buf = Buffer.alloc(length);
-      fs.readSync(fd, buf, 0, length, lastOffset);
-      fs.closeSync(fd);
+      await fd.read(buf, 0, length, lastOffset);
+      await fd.close();
       this.fileOffsets.set(filePath, stat.size);
 
       const newEntries = buf.toString('utf-8')
@@ -184,16 +186,21 @@ export class ClaudeCodeProvider {
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   /** Returns the most recently modified JSONL file in sessionDir, or undefined. */
-  private findLatestJsonl(sessionDir: string): string | undefined {
+  private async findLatestJsonlAsync(sessionDir: string): Promise<string | undefined> {
     try {
-      const files = fs.readdirSync(sessionDir)
-        .filter(f => f.endsWith('.jsonl'))
-        .map(f => {
+      const dirEntries = await fs.promises.readdir(sessionDir);
+      const jsonlFiles = dirEntries.filter(f => f.endsWith('.jsonl'));
+
+      const filesWithMtime = await Promise.all(
+        jsonlFiles.map(async f => {
           const full = path.join(sessionDir, f);
-          return { full, mtime: fs.statSync(full).mtimeMs };
+          const stat = await fs.promises.stat(full);
+          return { full, mtime: stat.mtimeMs };
         })
-        .sort((a, b) => b.mtime - a.mtime);
-      return files[0]?.full;
+      );
+
+      filesWithMtime.sort((a, b) => b.mtime - a.mtime);
+      return filesWithMtime[0]?.full;
     } catch {
       return undefined;
     }
@@ -212,47 +219,50 @@ export class ClaudeCodeProvider {
 
   // ── Directory resolution (unchanged) ──────────────────────────────────────
 
-  private resolveSessionDir(claudeDir: string): string | undefined {
+  private async resolveSessionDirAsync(claudeDir: string): Promise<string | undefined> {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders?.length) return undefined;
     const workspacePath = workspaceFolders[0].uri.fsPath;
 
-    const byContent = this.findDirByContent(claudeDir, workspacePath);
+    const byContent = await this.findDirByContentAsync(claudeDir, workspacePath);
     if (byContent) { log(`Session dir matched by content: ${byContent}`); return byContent; }
 
     const byName = this.findDirByName(claudeDir, workspacePath);
     if (byName) { log(`Session dir matched by name: ${byName}`); return byName; }
 
-    const fallback = this.mostRecentProjectDir(claudeDir);
+    const fallback = await this.mostRecentProjectDirAsync(claudeDir);
     if (fallback) log(`Session dir fallback (most recent): ${fallback}`);
     return fallback;
   }
 
-  private findDirByContent(claudeDir: string, workspacePath: string): string | undefined {
+  private async findDirByContentAsync(claudeDir: string, workspacePath: string): Promise<string | undefined> {
     const normalized = workspacePath.replace(/\\/g, '/').toLowerCase();
     try {
-      const projectDirs = fs.readdirSync(claudeDir, { withFileTypes: true })
+      const dirEntries = await fs.promises.readdir(claudeDir, { withFileTypes: true });
+      const projectDirs = dirEntries
         .filter(e => e.isDirectory())
         .map(e => path.join(claudeDir, e.name));
 
       for (const dirPath of projectDirs) {
-        const jsonlFiles = fs.readdirSync(dirPath)
+        const files = await fs.promises.readdir(dirPath);
+        const jsonlFiles = files
           .filter(f => f.endsWith('.jsonl'))
           .map(f => path.join(dirPath, f));
         for (const jf of jsonlFiles) {
-          if (this.fileContainsCwd(jf, normalized)) return dirPath;
+          if (await this.fileContainsCwdAsync(jf, normalized)) return dirPath;
         }
       }
     } catch { /* ignore */ }
     return undefined;
   }
 
-  private fileContainsCwd(filePath: string, normalizedCwd: string): boolean {
+  private async fileContainsCwdAsync(filePath: string, normalizedCwd: string): Promise<boolean> {
     try {
       const buf = Buffer.alloc(8192);
-      const fd  = fs.openSync(filePath, 'r');
-      const n   = fs.readSync(fd, buf, 0, 8192, 0);
-      fs.closeSync(fd);
+      const fd = await fs.promises.open(filePath, 'r');
+      const result = await fd.read(buf, 0, 8192, 0);
+      await fd.close();
+      const n = result.bytesRead;
       for (const line of buf.slice(0, n).toString('utf-8').split('\n').slice(0, 20)) {
         if (!line.trim()) continue;
         try {
@@ -286,17 +296,27 @@ export class ClaudeCodeProvider {
     return undefined;
   }
 
-  private mostRecentProjectDir(claudeDir: string): string | undefined {
+  private async mostRecentProjectDirAsync(claudeDir: string): Promise<string | undefined> {
     try {
-      return fs.readdirSync(claudeDir, { withFileTypes: true })
-        .filter(e => e.isDirectory())
-        .map(e => ({ dirPath: path.join(claudeDir, e.name), mtime: fs.statSync(path.join(claudeDir, e.name)).mtimeMs }))
-        .sort((a, b) => b.mtime - a.mtime)[0]?.dirPath;
+      const dirEntries = await fs.promises.readdir(claudeDir, { withFileTypes: true });
+      const dirs = dirEntries.filter(e => e.isDirectory());
+
+      const dirsWithMtime = await Promise.all(
+        dirs.map(async e => {
+          const fullPath = path.join(claudeDir, e.name);
+          const stat = await fs.promises.stat(fullPath);
+          return { dirPath: fullPath, mtime: stat.mtimeMs };
+        })
+      );
+
+      dirsWithMtime.sort((a, b) => b.mtime - a.mtime);
+      return dirsWithMtime[0]?.dirPath;
     } catch { return undefined; }
   }
 
-  private readAllLines(filePath: string): JournalEntry[] {
-    return fs.readFileSync(filePath, 'utf-8')
+  private async readAllLinesAsync(filePath: string): Promise<JournalEntry[]> {
+    const content = await fs.promises.readFile(filePath, 'utf-8');
+    return content
       .split('\n')
       .filter(l => l.trim())
       .map(l => this.parseLine(l))

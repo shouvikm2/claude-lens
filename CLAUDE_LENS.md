@@ -1029,6 +1029,6 @@ What Claude Lens owns that no other VS Code extension has as of March 2026:
 
 ---
 
-*Claude Lens — built under SignalToSilicon*  
+*Claude Lens — built by Shouvik Mukherjee*  
 *Privacy-first. Local-only. Open source.*  
-*Last updated: 2026-03-30*
+*Last updated: 2026-03-31*

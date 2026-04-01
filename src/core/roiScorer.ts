@@ -38,11 +38,18 @@ function scoreComplexity(
 ): number {
   let score = 0;
 
-  // Prompt token length — up to 20 pts
-  score += Math.min(tokens.input / 50, 20);
+  // In Claude Code sessions almost all input arrives via cache reads — the
+  // raw input_tokens count is nearly zero (just the new message) while
+  // cache_read_input_tokens carries the full context window. Use total
+  // effective context as the complexity signal.
+  const effectiveInput = tokens.input + (tokens.cacheCreation ?? 0) + (tokens.cacheRead ?? 0);
 
-  // Short prompt penalty — strong signal it's a simple question
-  if (tokens.input < 20) score -= 15;
+  // Effective context size — up to 25 pts
+  score += Math.min(effectiveInput / 50_000, 25);
+
+  // Short prompt penalty: only fires if the ENTIRE context (incl. cache) is tiny.
+  // A 2-token message with 1M cache reads is not a simple query.
+  if (effectiveInput < 500) score -= 15;
 
   // Architecture / complexity keywords in prompt
   const lp = promptText.toLowerCase();

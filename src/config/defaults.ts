@@ -20,12 +20,4 @@ export const DEFAULT_CONFIG: ClensConfig = {
     nudge_on_overkill: true,
     nudge_cooldown_min: 10,
   },
-  reports: {
-    auto_generate: true,
-    output_dir: '.claudelens/reports',
-    format: 'markdown',
-    client_billing_mode: false,
-    client_name: '',
-    billing_rate_usd: 0,
-  },
 };

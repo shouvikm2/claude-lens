@@ -1,21 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <!-- Background -->
-  <rect width="128" height="128" rx="16" fill="#1a1a2e"/>
-  <!-- Hexagon outline (⬡ symbol) -->
-  <polygon
-    points="64,12 104,36 104,92 64,116 24,92 24,36"
-    fill="none"
-    stroke="#7c6af7"
-    stroke-width="6"
-    stroke-linejoin="round"
-  />
-  <!-- Dollar sign -->
-  <text
-    x="64" y="80"
-    font-family="monospace, sans-serif"
-    font-size="52"
-    font-weight="bold"
-    fill="#7c6af7"
-    text-anchor="middle"
-  >$</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <!-- Magnifying glass circle -->
+  <circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="2.5"/>
+
+  <!-- Search symbol (asterisk in center) -->
+  <line x1="9" y1="5" x2="9" y2="13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  <line x1="6.5" y1="6.5" x2="11.5" y2="11.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+  <line x1="11.5" y1="6.5" x2="6.5" y2="11.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- Handle -->
+  <line x1="14" y1="14" x2="22" y2="22" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
 </svg>

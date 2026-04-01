@@ -9,12 +9,14 @@ import { ManualProvider } from './providers/manualProvider.js';
 import { SessionTracker } from './core/sessionTracker.js';
 import { BudgetEngine } from './core/budgetEngine.js';
 import { scoreTurn, sessionSummary, type TurnScore } from './core/roiScorer.js';
-import { writeReport, listReports } from './core/reportWriter.js';
 import { StatusBar } from './ui/statusBar.js';
 import { SidebarProvider } from './ui/sidebarPanel.js';
+import { ClaudeAiLimitsProvider } from './providers/claudeAiLimitsProvider.js';
+import { getAvailableModels, setModel, clearModel, getActiveModel } from './core/modelSwitcher.js';
+import { formatDuration } from './utils/formatter.js';
 import { loadPriceTable } from './utils/priceTable.js';
 import { log, disposeLogger } from './utils/logger.js';
-import type { SessionState } from './core/sessionTracker.js';
+import { notifyTurnQuotaUsage } from './ui/notifications.js';
 import type { JournalEntry } from './providers/claudeCodeProvider.js';
 
 export type DataSource = 'claude-code-logs' | 'anthropic-api' | 'manual' | 'none';
@@ -63,38 +65,15 @@ export function activate(context: vscode.ExtensionContext): void {
     sidebarProvider.update(state, budgetReport, config, sessionSummary(turnScores), activeDataSource);
   }
 
-  function refreshReportsList(): void {
-    const reports = listReports(workspaceConfig.get(), workspaceRoot());
-    sidebarProvider.setReports(reports);
-  }
-
-  async function generateReport(state: SessionState): Promise<void> {
-    const config = workspaceConfig.get();
-    const root   = workspaceRoot();
-    if (!root) return;
-    const budgetReport = budgetEngine.evaluate(state, config);
-    await writeReport({
-      session: state, roiSummary: sessionSummary(turnScores),
-      budgetReport, config, workspaceRoot: root,
-    });
-    refreshReportsList();
-  }
-
   // ── Session tracker events ────────────────────────────────────────────────
 
   const onUpdate = sessionTracker.onUpdate(() => refreshUI());
 
-  const onReset = sessionTracker.onReset(async completedState => {
-    if (workspaceConfig.get().reports.auto_generate) {
-      await generateReport(completedState);
-    }
+  const onReset = sessionTracker.onReset(() => {
     turnScores.length = 0;
   });
 
-  const onConfigChange = workspaceConfig.onDidChange(() => {
-    refreshUI();
-    refreshReportsList();
-  });
+  const onConfigChange = workspaceConfig.onDidChange(() => refreshUI());
 
   // ── Entry processing (shared by all providers) ────────────────────────────
 
@@ -147,6 +126,19 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       lastPromptText   = '';
       lastResponseText = '';
+
+      // Refresh quota immediately after each completed turn so the sidebar
+      // reflects actual usage rather than waiting up to 5 minutes.
+      void limitsProvider.refreshNow();
+
+      // Calculate and display per-turn quota consumption
+      const limits = limitsProvider.getLastData();
+      const turnQuota = sessionTracker.calculateTurnQuotaPercentage(limits || { session: undefined, weekly: undefined, subscriptionType: '' });
+      if (turnQuota && limits?.session) {
+        notifyTurnQuotaUsage(turnQuota.pct, turnQuota.tokens, limits.session.pctUsed);
+        // Store in session state for sidebar display (SessionTracker handles this internally)
+        sessionTracker.setLastTurnQuotaUsage(turnQuota);
+      }
     }
   }
 
@@ -218,42 +210,89 @@ export function activate(context: vscode.ExtensionContext): void {
   // ── Provider 3: Manual entry ──────────────────────────────────────────────
   const manualProvider = new ManualProvider(sessionTracker);
 
+  // ── Provider 4: Claude.ai plan limits (session % / weekly %) ─────────────
+  // Reads ~/.claude/.credentials.json and calls api.anthropic.com/api/oauth/usage
+  // to get real subscription usage — same numbers shown on claude.ai/settings.
+  // Polls every 5 min (endpoint rate-limits aggressively at shorter intervals).
+  const limitsProvider = new ClaudeAiLimitsProvider();
+
+  let lastSessionAlertPct = 0;  // tracks highest % we've already alerted on
+
+  void limitsProvider.load().then(ok => {
+    if (!ok) {
+      log('ClaudeAiLimitsProvider: credentials not available');
+      return;
+    }
+    // Seed the sidebar with subscription type immediately from credentials
+    // so the API Cost Estimate section starts collapsed for Pro/Max users
+    // before the first API poll completes.
+    const subType = limitsProvider.getSubscriptionType();
+    if (subType) {
+      const seed = { subscriptionType: subType, session: undefined, weekly: undefined };
+      sidebarProvider.updatePlanLimits(seed);
+      statusBar.updateLimits(seed);
+    }
+    limitsProvider.startPolling(limits => {
+      sidebarProvider.updatePlanLimits(limits);
+      statusBar.updateLimits(limits);
+      if (!limits?.session) return;
+
+      const sessionPct = Math.round(limits.session.pctUsed * 100);
+      const weeklyPct = limits.weekly ? Math.round(limits.weekly.pctUsed * 100) : undefined;
+
+      // Fire once per threshold crossing (80%, 90%) — never re-alert same level
+      if (sessionPct >= 90 && lastSessionAlertPct < 90) {
+        lastSessionAlertPct = 90;
+        const resetsIn = formatDuration(Math.max(0, limits.session.resetAt.getTime() - Date.now()));
+        const msg = weeklyPct !== undefined
+          ? `⬡ Session at 90%, Weekly at ${weeklyPct}% — resets in ${resetsIn}`
+          : `⬡ Claude session at 90% — resets in ${resetsIn}`;
+        vscode.window
+          .showWarningMessage(msg, 'View on claude.ai', 'Dismiss')
+          .then(choice => {
+            if (choice === 'View on claude.ai') {
+              void vscode.env.openExternal(vscode.Uri.parse('https://claude.ai/settings/usage'));
+            }
+          });
+      } else if (sessionPct >= 80 && lastSessionAlertPct < 80) {
+        lastSessionAlertPct = 80;
+        const resetsIn = formatDuration(Math.max(0, limits.session.resetAt.getTime() - Date.now()));
+        const msg = weeklyPct !== undefined
+          ? `⬡ Session at 80%, Weekly at ${weeklyPct}% — resets in ${resetsIn}`
+          : `⬡ Claude session at 80% — resets in ${resetsIn}`;
+        vscode.window
+          .showInformationMessage(msg, 'View on claude.ai', 'Dismiss')
+          .then(choice => {
+            if (choice === 'View on claude.ai') {
+              void vscode.env.openExternal(vscode.Uri.parse('https://claude.ai/settings/usage'));
+            }
+          });
+      }
+
+      // Reset alert level when session resets (sessionPct drops below previous alert)
+      if (sessionPct < lastSessionAlertPct) {
+        lastSessionAlertPct = 0;
+      }
+    }, 300_000);
+  });
+
   // ── Workspace config ──────────────────────────────────────────────────────
 
   void workspaceConfig.load().then(config => {
     const root = workspaceRoot();
     sidebarProvider.setConfigFileExists(!!root && fs.existsSync(path.join(root, '.claudelens')));
     log(`Config loaded — project: "${config.project}"`);
-    if (root) refreshReportsList();
   });
 
   // ── Commands ──────────────────────────────────────────────────────────────
 
   const cmds = [
     vscode.commands.registerCommand('claudeLens.openHUD', () => {
-      vscode.window.showInformationMessage('⬡ Claude Lens HUD — coming in Phase 3.');
+      void vscode.commands.executeCommand('workbench.view.extension.claudeLens');
     }),
 
-    vscode.commands.registerCommand('claudeLens.generateReport', async () => {
-      const state = sessionTracker.getState();
-      if (state.turnCount === 0) {
-        vscode.window.showInformationMessage('⬡ Claude Lens: No activity in this session yet.');
-        return;
-      }
-      await generateReport(state);
-    }),
-
-    vscode.commands.registerCommand('claudeLens.openReportsFolder', () => {
-      const config = workspaceConfig.get();
-      const root   = workspaceRoot();
-      if (!root) { vscode.window.showWarningMessage('Open a workspace folder first.'); return; }
-      const dir = path.isAbsolute(config.reports.output_dir)
-        ? config.reports.output_dir
-        : path.join(root, config.reports.output_dir);
-      if (!fs.existsSync(dir)) {
-        vscode.window.showInformationMessage('⬡ Claude Lens: No reports generated yet.'); return;
-      }
-      void vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(dir));
+    vscode.commands.registerCommand('claudeLens.openClaudeAiUsage', () => {
+      void vscode.env.openExternal(vscode.Uri.parse('https://claude.ai/settings/usage'));
     }),
 
     vscode.commands.registerCommand('claudeLens.resetSession', () => {
@@ -293,8 +332,6 @@ export function activate(context: vscode.ExtensionContext): void {
         budget: { session: 0.5, daily: 2.0, weekly: 10.0, currency: 'USD' },
         alerts: { soft_threshold: 0.8, hard_stop: false, notify_on_reset: true },
         model_roi: { enabled: true, preferred_model: 'sonnet', nudge_on_overkill: true, nudge_cooldown_min: 10 },
-        reports: { auto_generate: true, output_dir: '.claudelens/reports', format: 'markdown',
-                   client_billing_mode: false, client_name: '', billing_rate_usd: 0 },
       }, null, 2);
       fs.writeFileSync(configPath, template, 'utf-8');
       sidebarProvider.setConfigFileExists(true);
@@ -326,6 +363,32 @@ export function activate(context: vscode.ExtensionContext): void {
       await anthropicProvider.clearApiKey();
       vscode.window.showInformationMessage('⬡ Claude Lens: API key cleared.');
     }),
+
+    vscode.commands.registerCommand('claudeLens.switchModel', async () => {
+      const models  = getAvailableModels();
+      const current = getActiveModel();
+      const items   = [
+        ...models.map(m => ({
+          label:       m.label,
+          description: m.id === current ? '← active' : '',
+          id:          m.id,
+        })),
+        { label: 'Reset to default (Claude Code decides)', description: '', id: '' },
+      ];
+      const picked = await vscode.window.showQuickPick(items, {
+        title:        'Switch Claude Code model',
+        placeHolder:  'Select model — writes to ~/.claude/settings.json',
+      });
+      if (!picked) return;
+      if (picked.id === '') {
+        clearModel();
+        vscode.window.showInformationMessage('⬡ Claude Lens: Model preference cleared — Claude Code will use its default.');
+      } else {
+        setModel(picked.id);
+        vscode.window.showInformationMessage(`⬡ Claude Lens: Model set to ${picked.id}. Takes effect on next Claude Code session.`);
+      }
+      sidebarProvider.refresh();
+    }),
   ];
 
   context.subscriptions.push(
@@ -335,6 +398,7 @@ export function activate(context: vscode.ExtensionContext): void {
     statusBar,
     claudeProvider,
     anthropicProvider,
+    limitsProvider,
     workspaceConfig,
     sidebarProvider,
     ...cmds

@@ -48,9 +48,15 @@ export class BudgetEngine {
     const softT = config.alerts.soft_threshold;
     const totals = this.store.getBudgetTotals();
 
-    const sessionBand = band(state.cost.net, config.budget.session, softT);
-    const dailyBand = band(totals.dailySpend + state.cost.net, config.budget.daily, softT);
-    const weeklyBand = band(totals.weeklySpend + state.cost.net, config.budget.weekly, softT);
+    // Use gross cost (input + output + cache creation) for budget tracking.
+    // Net cost subtracts cache savings which can zero out the figure entirely
+    // for Pro/Max subscription users with large context windows — making
+    // budget alerts meaningless. Gross cost reflects actual API work done.
+    const gross = state.cost.input + state.cost.output + state.cost.cacheCreation;
+
+    const sessionBand = band(gross, config.budget.session, softT);
+    const dailyBand   = band(totals.dailySpend  + gross, config.budget.daily,   softT);
+    const weeklyBand  = band(totals.weeklySpend + gross, config.budget.weekly,  softT);
     const overall = worstStatus(sessionBand.status, dailyBand.status, weeklyBand.status);
 
     return {

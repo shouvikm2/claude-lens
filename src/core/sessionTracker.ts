@@ -3,8 +3,15 @@ import { randomUUID } from 'crypto';
 import { calculateCost } from '../utils/priceTable.js';
 import { log } from '../utils/logger.js';
 import type { JournalEntry } from '../providers/claudeCodeProvider.js';
+import type { PlanLimits } from '../providers/claudeAiLimitsProvider.js';
 
 const SESSION_WINDOW_HOURS = 5;
+
+export interface LastTurnQuotaUsage {
+  pct: number;      // 0-100, percentage of session limit
+  tokens: number;   // total tokens used in this turn
+  timestamp: Date;
+}
 
 export interface SessionState {
   id: string;
@@ -29,6 +36,7 @@ export interface SessionState {
   resetTime: Date;
   recentPrompts: string[];
   filesChanged: string[];
+  lastTurnQuotaUsage?: LastTurnQuotaUsage;
 }
 
 function emptySession(startTime: Date): SessionState {
@@ -52,6 +60,7 @@ export class SessionTracker {
   private readonly updateEmitter = new vscode.EventEmitter<SessionState>();
   private readonly resetEmitter  = new vscode.EventEmitter<SessionState>();
   private resetTimer: NodeJS.Timeout | undefined;
+  private lastTurnTotalTokens = 0;
 
   readonly onUpdate = this.updateEmitter.event;
   readonly onReset  = this.resetEmitter.event;
@@ -113,6 +122,7 @@ export class SessionTracker {
       this.state.model
     );
 
+    this.lastTurnTotalTokens = this.state.tokens.total;
     this.updateEmitter.fire(this.state);
   }
 
@@ -130,12 +140,65 @@ export class SessionTracker {
     };
   }
 
+  /** Store the last turn's quota usage data */
+  setLastTurnQuotaUsage(usage: LastTurnQuotaUsage): void {
+    this.state.lastTurnQuotaUsage = usage;
+    this.updateEmitter.fire(this.state);
+  }
+
+  /** Calculate what percentage of the session quota this turn consumed */
+  calculateTurnQuotaPercentage(limits: PlanLimits): LastTurnQuotaUsage | null {
+    // Need at least 2 turns to calculate delta (user -> assistant -> user -> assistant)
+    if (this.state.turnCount < 1 || !limits.session) {
+      return null;
+    }
+
+    const currentTotal = this.state.tokens.total;
+    const turnTokens = currentTotal - this.lastTurnTotalTokens;
+
+    if (turnTokens <= 0) {
+      return null;
+    }
+
+    // Infer session token limit from current usage and percentage
+    // If we're at 42% of session quota with 1M tokens, limit = 1M / 0.42 = ~2.38M
+    const sessionLimitTokens = limits.session.pctUsed > 0
+      ? Math.round(currentTotal / limits.session.pctUsed)
+      : null;
+
+    // If we can't infer the limit, use subscription-based estimates
+    const estimatedLimit = sessionLimitTokens || this.estimateSessionTokenLimit();
+
+    const turnPct = (turnTokens / estimatedLimit) * 100;
+
+    return {
+      pct: Math.round(turnPct * 10) / 10,  // Round to 1 decimal place
+      tokens: turnTokens,
+      timestamp: new Date(),
+    };
+  }
+
+  /** Estimate session token limit based on subscription type */
+  private estimateSessionTokenLimit(): number {
+    // Default estimates based on subscription tier
+    // These can be made configurable later
+    const model = this.state.model.toLowerCase();
+
+    // Haiku = 1M, Sonnet = 2M, Opus = 4M
+    if (model.includes('haiku')) return 1_000_000;
+    if (model.includes('opus')) return 4_000_000;
+
+    // Default to Sonnet/Pro tier
+    return 2_000_000;
+  }
+
   /** Manual reset (user command or new JSONL file detected by provider). */
   reset(): void {
     log(`Session reset — was: ${this.state.id}`);
     const completed: SessionState = { ...this.getState(), endTime: new Date() };
     this.resetEmitter.fire(completed);
     this.state = emptySession(new Date());
+    this.lastTurnTotalTokens = 0;
     this.scheduleReset();
     this.updateEmitter.fire(this.state);
   }

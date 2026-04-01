@@ -1,10 +1,15 @@
 {
   "name": "claude-lens",
   "displayName": "Claude Lens",
-  "description": "Cost intelligence and efficiency coaching for Claude AI — budget caps, ROI scoring, billing reports. Local only, zero telemetry.",
-  "version": "0.1.0",
-  "publisher": "shouvikm2",
+  "description": "Real-time Claude usage intelligence for VS Code — plan quotas, budget caps, ROI scoring, model switching. Local only, zero telemetry.",
+  "version": "1.0.6",
+  "publisher": "shouvikm",
   "license": "MIT",
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#1a1a1a",
+    "theme": "dark"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/shouvikm2/claude-lens"
@@ -28,7 +33,7 @@
   "activationEvents": [
     "onStartupFinished"
   ],
-  "main": "./out/src/extension.js",
+  "main": "./out/main.js",
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -54,11 +59,6 @@
         "category": "Claude Lens"
       },
       {
-        "command": "claudeLens.generateReport",
-        "title": "Generate Report Now",
-        "category": "Claude Lens"
-      },
-      {
         "command": "claudeLens.resetSession",
         "title": "Reset Session",
         "category": "Claude Lens"
@@ -79,11 +79,6 @@
         "category": "Claude Lens"
       },
       {
-        "command": "claudeLens.openReportsFolder",
-        "title": "Open Reports Folder",
-        "category": "Claude Lens"
-      },
-      {
         "command": "claudeLens.manualEntry",
         "title": "Manual Token Entry",
         "category": "Claude Lens"
@@ -96,6 +91,16 @@
       {
         "command": "claudeLens.clearApiKey",
         "title": "Clear Anthropic API Key",
+        "category": "Claude Lens"
+      },
+      {
+        "command": "claudeLens.openClaudeAiUsage",
+        "title": "View Usage on claude.ai",
+        "category": "Claude Lens"
+      },
+      {
+        "command": "claudeLens.switchModel",
+        "title": "Switch Claude Code Model",
         "category": "Claude Lens"
       }
     ],
@@ -111,9 +116,10 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run bundle",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
+    "bundle": "esbuild ./src/extension.ts --bundle --outfile=out/main.js --external:vscode --platform=node --minify",
     "lint": "eslint src/",
     "test": "node ./out/test/runTests.js"
   },
@@ -121,9 +127,10 @@
     "@types/mocha": "^10.0.6",
     "@types/node": "18.x",
     "@types/vscode": "^1.85.0",
-    "@typescript-eslint/eslint-plugin": "^7.0.0",
-    "@typescript-eslint/parser": "^7.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.58.0",
+    "@typescript-eslint/parser": "^8.58.0",
     "@vscode/test-electron": "^2.3.8",
+    "esbuild": "^0.27.4",
     "eslint": "^8.56.0",
     "glob": "^11.0.0",
     "mocha": "^11.0.0",
@@ -131,9 +138,5 @@
   },
   "dependencies": {
     "zod": "^3.22.4"
-  },
-  "overrides": {
-    "serialize-javascript": "^7.0.5",
-    "diff": "^8.0.4"
   }
 }

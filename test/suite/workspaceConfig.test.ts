@@ -89,7 +89,6 @@ suite('WorkspaceConfig / Schema', () => {
       budget: { session: 1.0, daily: 5.0, weekly: 20.0, currency: 'USD' },
       alerts: { soft_threshold: 0.75, hard_stop: true, notify_on_reset: false },
       model_roi: { enabled: false, preferred_model: 'haiku', nudge_on_overkill: false, nudge_cooldown_min: 5 },
-      reports: { auto_generate: false, output_dir: '/tmp/reports', format: 'markdown', client_billing_mode: true, client_name: 'Acme', billing_rate_usd: 150 },
     };
     try {
       fs.writeFileSync(tmpFile, JSON.stringify(config), 'utf-8');
@@ -99,7 +98,6 @@ suite('WorkspaceConfig / Schema', () => {
       if (parsed.success) {
         assert.strictEqual(parsed.data.project, 'roundtrip-test');
         assert.strictEqual(parsed.data.budget.session, 1.0);
-        assert.strictEqual(parsed.data.reports.client_name, 'Acme');
       }
     } finally {
       if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
