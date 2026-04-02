@@ -34,7 +34,7 @@ async function validateWorkspaceFilePath(workspaceRoot: string, requestedPath: s
     try {
       realPath = await fs.promises.realpath(requestedPath);
     } catch (err) {
-      if ((err as any).code === 'ENOENT') {
+      if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
         // File doesn't exist; resolve parent directory
         const parent = path.dirname(requestedPath);
         realPath = await fs.promises.realpath(parent);
@@ -249,7 +249,8 @@ export function activate(context: vscode.ExtensionContext): void {
   // ── Provider 3: Claude.ai plan limits (session % / weekly %) ──────────────
   // Reads ~/.claude/.credentials.json and calls api.anthropic.com/api/oauth/usage
   // to get real subscription usage — same numbers shown on claude.ai/settings.
-  // Polls every 5 min (endpoint rate-limits aggressively at shorter intervals).
+  // Polls every 15 min with exponential backoff on failures (endpoint rate-limits aggressively).
+  // Shows cached data on failure (graceful degradation) instead of breaking the UI.
   const limitsProvider = new ClaudeAiLimitsProvider();
 
   let lastSessionAlertPct = 0;  // tracks highest % we've already alerted on
@@ -270,7 +271,7 @@ export function activate(context: vscode.ExtensionContext): void {
       statusBar.updateLimits(seed);
     }
     limitsProvider.startPolling(limits => {
-      sidebarProvider.updatePlanLimits(limits, limitsProvider.getLastError());
+      sidebarProvider.updatePlanLimits(limits, limitsProvider.getLastError(), limitsProvider.getDataStalenessMs());
       statusBar.updateLimits(limits);
       if (!limits?.session) return;
 
@@ -310,7 +311,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (sessionPct < lastSessionAlertPct) {
         lastSessionAlertPct = 0;
       }
-    }, 300_000);
+    }, 900_000);  // 15 minutes — reduced from 5 min to minimize rate limit hits
   }).catch(err => {
     const msg = err instanceof Error ? err.message : String(err);
     log(`[ERROR] ClaudeAiLimitsProvider initialization failed: ${msg}`);

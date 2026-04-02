@@ -33,6 +33,8 @@ export class ClaudeAiLimitsProvider {
   private lastError: string | undefined;
   private lastCredsFetch = 0;
   private readonly CREDS_CACHE_TTL_MS = 5 * 60 * 1000;  // 5 minutes
+  private lastDataFetchAt = 0;  // timestamp of last successful fetch
+  private fetchInFlight: Promise<PlanLimits | undefined> | undefined;  // deduplication
 
   // ── Load credentials from ~/.claude/.credentials.json ────────────────────
 
@@ -86,45 +88,63 @@ export class ClaudeAiLimitsProvider {
   // ── Fetch limits ──────────────────────────────────────────────────────────
 
   async fetchLimits(): Promise<PlanLimits | undefined> {
-    // Only re-read credentials from disk if cache expired.
-    // Claude Code updates token ~hourly, so 5-min cache is safe while
-    // significantly reducing plaintext filesystem accesses.
-    const now = Date.now();
-    if (now - this.lastCredsFetch > this.CREDS_CACHE_TTL_MS) {
-      await this.load();
+    // Deduplication: if a fetch is already in flight, reuse that promise
+    if (this.fetchInFlight) {
+      return this.fetchInFlight;
     }
-    if (!this.creds?.claudeAiOauth?.accessToken) return undefined;
 
-    const token   = this.creds.claudeAiOauth.accessToken;
-    const subType = this.creds.claudeAiOauth.subscriptionType ?? 'unknown';
+    this.fetchInFlight = (async () => {
+      try {
+        // Only re-read credentials from disk if cache expired.
+        // Claude Code updates token ~hourly, so 5-min cache is safe while
+        // significantly reducing plaintext filesystem accesses.
+        const now = Date.now();
+        if (now - this.lastCredsFetch > this.CREDS_CACHE_TTL_MS) {
+          await this.load();
+        }
+        if (!this.creds?.claudeAiOauth?.accessToken) return undefined;
 
-    // Undocumented but community-confirmed endpoint (GitHub issue #13585).
-    // Returns the exact session/weekly usage shown on claude.ai/settings.
-    // Requires the Claude Code OAuth token (not an API key) + beta header.
-    // Known to rate-limit aggressively — we poll at most every 5 minutes.
-    const urlPath = '/api/oauth/usage';
-    try {
-      log(`ClaudeAiLimitsProvider: GET https://api.anthropic.com${urlPath}`);
-      const body = await this.get(urlPath, token);
-      log(`ClaudeAiLimitsProvider: response: ${JSON.stringify(sanitizeSensitiveData(body))}`);
-      const parsed = this.parseLimits(body, subType);
-      if (parsed) {
-        this.lastData = parsed;
-        this.lastError = undefined;
-        return parsed;
+        const token   = this.creds.claudeAiOauth.accessToken;
+        const subType = this.creds.claudeAiOauth.subscriptionType ?? 'unknown';
+
+        // Undocumented but community-confirmed endpoint (GitHub issue #13585).
+        // Returns the exact session/weekly usage shown on claude.ai/settings.
+        // Requires the Claude Code OAuth token (not an API key) + beta header.
+        // Rate-limited aggressively — we poll infrequently (15 min) with exponential backoff.
+        const urlPath = '/api/oauth/usage';
+        try {
+          log(`ClaudeAiLimitsProvider: GET https://api.anthropic.com${urlPath}`);
+          const body = await this.get(urlPath, token);
+          log(`ClaudeAiLimitsProvider: response: ${JSON.stringify(sanitizeSensitiveData(body))}`);
+          const parsed = this.parseLimits(body, subType);
+          if (parsed) {
+            this.lastData = parsed;
+            this.lastDataFetchAt = Date.now();
+            this.lastError = undefined;
+            return parsed;
+          }
+          this.lastError = 'Unexpected response shape from claude.ai';
+          log('ClaudeAiLimitsProvider: response shape not recognised');
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          this.lastError = msg;
+          log(`ClaudeAiLimitsProvider: request failed — ${msg}`);
+        }
+        return undefined;
+      } finally {
+        this.fetchInFlight = undefined;
       }
-      this.lastError = 'Unexpected response shape from claude.ai';
-      log('ClaudeAiLimitsProvider: response shape not recognised');
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.lastError = msg;
-      log(`ClaudeAiLimitsProvider: request failed — ${msg}`);
-    }
-    return undefined;
+    })();
+
+    return this.fetchInFlight;
   }
 
   getLastData(): PlanLimits | undefined { return this.lastData; }
   getLastError(): string | undefined { return this.lastError; }
+
+  getDataStalenessMs(): number {
+    return Date.now() - this.lastDataFetchAt;
+  }
 
   // Called externally when a turn completes so quota updates immediately
   // rather than waiting for the next poll. Respects a minimum gap to avoid
@@ -148,9 +168,11 @@ export class ClaudeAiLimitsProvider {
 
   // ── Polling ───────────────────────────────────────────────────────────────
 
-  startPolling(onChange: (limits: PlanLimits | null) => void, intervalMs = 300_000): void {
+  startPolling(onChange: (limits: PlanLimits | null) => void, intervalMs = 900_000): void {
     this.onChange = onChange;
     let failCount = 0;
+    // Exponential backoff delays: 30s, 30s, 90s, 90s, then settle to normal interval
+    const backoffDelays = [30_000, 30_000, 90_000, 90_000];
 
     const schedule = (delayMs: number) => {
       this.pollTimer = setTimeout(() => void tick(), delayMs);
@@ -165,9 +187,15 @@ export class ClaudeAiLimitsProvider {
         schedule(intervalMs);
       } else {
         failCount++;
-        onChange(null);
-        // On failure, retry at 30s up to 3 times before settling into normal cadence
-        schedule(failCount <= 3 ? 30_000 : intervalMs);
+        // On failure, show cached data if available instead of null (graceful degradation)
+        onChange(this.lastData ?? null);
+
+        // Determine next retry delay based on failure count
+        let nextDelay = intervalMs;  // default 15 min on sustained failures
+        if (failCount <= backoffDelays.length) {
+          nextDelay = backoffDelays[failCount - 1];
+        }
+        schedule(nextDelay);
       }
     };
 
@@ -231,7 +259,7 @@ export class ClaudeAiLimitsProvider {
   private get(urlPath: string, token: string): Promise<unknown> {
     return new Promise((resolve, reject) => {
       let settled = false;
-      let timeoutHandle: NodeJS.Timeout | undefined;
+      let timeoutHandle: NodeJS.Timeout | undefined = undefined;
 
       const cleanup = () => {
         if (timeoutHandle) clearTimeout(timeoutHandle);
@@ -299,6 +327,9 @@ export class ClaudeAiLimitsProvider {
   }
 
   dispose(): void {
-    if (this.pollTimer) clearTimeout(this.pollTimer);
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = undefined;
+    }
   }
 }

@@ -39,7 +39,7 @@ export function sanitizeSensitiveData(obj: unknown, depth = 0): unknown {
 
   if (typeof obj === 'string') {
     // Check if the string looks like a token (long base64-like string)
-    if (obj.length > 50 && /^[A-Za-z0-9_\-\.]+$/.test(obj)) {
+    if (obj.length > 50 && /^[A-Za-z0-9_\-.]+$/.test(obj)) {
       return `[REDACTED_${obj.slice(0, 4)}...${obj.slice(-4)}]`;
     }
     return obj;

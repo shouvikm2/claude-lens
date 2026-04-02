@@ -29,6 +29,7 @@ export class SidebarProvider implements vscode.TreeDataProvider<LensItem> {
   private roi:        RoiSummary   | undefined;
   private planLimits: PlanLimits | null | undefined;  // undefined=loading, null=failed, PlanLimits=ok
   private planError: string | undefined;
+  private planStalenessMs: number | undefined;  // how old the plan data is (ms)
 
   private configFileExists = false;
   private dataSource: DataSource = 'none';
@@ -54,9 +55,10 @@ export class SidebarProvider implements vscode.TreeDataProvider<LensItem> {
 
   refresh(): void { this.scheduleRefresh(); }
 
-  updatePlanLimits(limits: PlanLimits | null, error?: string): void {
+  updatePlanLimits(limits: PlanLimits | null, error?: string, stalenessMs?: number): void {
     this.planLimits = limits;
     this.planError = error;
+    this.planStalenessMs = stalenessMs;
     this.scheduleRefresh();
   }
 
@@ -89,11 +91,18 @@ export class SidebarProvider implements vscode.TreeDataProvider<LensItem> {
 
   // ── Plan Quota ─────────────────────────────────────────────────────────────
 
+  private formatStaleness(ms: number): string {
+    if (ms < 60_000) return 'just now';
+    if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m ago`;
+    return `${Math.round(ms / 3_600_000)}h ago`;
+  }
+
   private buildPlanQuotaSection(): LensItem {
     const lim = this.planLimits;
+    const isStale = this.planStalenessMs && this.planStalenessMs > 10 * 60_000;  // older than 10 minutes
 
     const root = new LensItem(
-      lim ? `🌐 Plan Quota (${lim.subscriptionType})` : '🌐 Plan Quota (claude.ai)',
+      lim ? `🌐 Plan Quota (${lim.subscriptionType})${isStale ? ' — data may be stale' : ''}` : '🌐 Plan Quota (claude.ai)',
       vscode.TreeItemCollapsibleState.Expanded
     );
 
@@ -107,7 +116,8 @@ export class SidebarProvider implements vscode.TreeDataProvider<LensItem> {
         const pct    = Math.round(lim.session.pctUsed * 100);
         const bar    = formatProgressBar(lim.session.pctUsed, 10);
         const resetsIn = formatDuration(Math.max(0, lim.session.resetAt.getTime() - Date.now()));
-        const item   = this.leaf(`Session   ${pct}%  [${bar}]  resets in ${resetsIn}`);
+        const staleInfo = this.planStalenessMs ? `  (updated ${this.formatStaleness(this.planStalenessMs)})` : '';
+        const item   = this.leaf(`Session   ${pct}%  [${bar}]  resets in ${resetsIn}${staleInfo}`);
         if (pct >= 90) item.iconPath = new vscode.ThemeIcon('warning', new vscode.ThemeColor('statusBarItem.errorBackground'));
         else if (pct >= 80) item.iconPath = new vscode.ThemeIcon('warning', new vscode.ThemeColor('statusBarItem.warningBackground'));
         children.push(item);
@@ -141,6 +151,8 @@ export class SidebarProvider implements vscode.TreeDataProvider<LensItem> {
       if (lim === undefined) {
         root.children = [this.leaf('Fetching usage from claude.ai…'), link];
       } else {
+        // null: no data available. Only show error if we don't have cached data.
+        // This case should rarely happen now with graceful degradation.
         const detail = this.planError
           ? this.leaf(`Could not load — ${this.planError}`)
           : this.leaf('Could not load — check Output > Claude Lens');
