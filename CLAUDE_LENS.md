@@ -46,7 +46,6 @@
 Solo developers on paid Claude plans (Pro, Max5, Max20) who want financial visibility, per-project budget control, model efficiency scoring, and exportable session cost reports — without any data leaving their machine.
 
 ### What Claude Lens Is NOT
-- Not a token monitor (five already exist)
 - Not a Claude Code replacement
 - Not a cloud sync tool
 - Not a team analytics platform (yet)
@@ -57,14 +56,14 @@ Solo developers on paid Claude plans (Pro, Max5, Max20) who want financial visib
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    VS Code Extension Host                │
+│                    VS Code Extension Host               │
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
-│  ┌─────────────┐  ┌───────────────┐  │
-│  │ claudeCode  │  │  workspaceConf│  │
-│  │  Provider   │  │  ig (.clens)  │  │
-│  └──────┬──────┘  └───────┬───────┘  │
-│         └────────────────┘           │
+│  ┌─────────────┐  ┌───────────────┐                     │
+│  │ claudeCode  │  │  workspaceConf│                     │
+│  │  Provider   │  │  ig (.clens)  │                     │
+│  └──────┬──────┘  └───────┬───────┘                     │
+│         └────────────────┘                              │
 │                          │                              │
 │                  ┌───────▼────────┐                     │
 │                  │ sessionTracker │                     │
@@ -73,18 +72,18 @@ Solo developers on paid Claude plans (Pro, Max5, Max20) who want financial visib
 │                          │                              │
 │         ┌────────────────┼────────────────┐             │
 │         ▼                ▼                ▼             │
-│  ┌─────────────┐  ┌────────────┐  ┌────────────────┐   │
-│  │budgetEngine │  │ roiScorer  │  │ reportWriter   │   │
-│  │ (PILLAR 1)  │  │ (PILLAR 2) │  │  (PILLAR 3)    │   │
-│  └──────┬──────┘  └─────┬──────┘  └───────┬────────┘   │
+│  ┌─────────────┐  ┌────────────┐  ┌────────────────┐    │
+│  │budgetEngine │  │ roiScorer  │  │ reportWriter   │    │
+│  │ (PILLAR 1)  │  │ (PILLAR 2) │  │  (PILLAR 3)    │    │
+│  └──────┬──────┘  └─────┬──────┘  └───────┬────────┘    │
 │         └───────────────┴─────────────────┘             │
 │                          │                              │
 │         ┌────────────────┼────────────────┐             │
 │         ▼                ▼                ▼             │
-│  ┌─────────────┐  ┌────────────┐  ┌────────────────┐   │
-│  │  statusBar  │  │ sidebarPane│  │  hudWebview    │   │
-│  │  (strip)    │  │  l (tree)  │  │  (charts)      │   │
-│  └─────────────┘  └────────────┘  └────────────────┘   │
+│  ┌─────────────┐  ┌────────────┐  ┌────────────────┐    │
+│  │  statusBar  │  │ sidebarPane│  │  hudWebview    │    │
+│  │  (strip)    │  │  l (tree)  │  │  (charts)      │    │
+│  └─────────────┘  └────────────┘  └────────────────┘    │
 │                                                         │
 │                  ┌─────────────────┐                    │
 │                  │   localStore    │                    │
@@ -926,39 +925,8 @@ npx ovsx publish claude-lens-0.1.0.vsix -p <token>
 
 ---
 
-## 13. Development Rules
 
-These rules are absolute. No exceptions.
-
-1. **Zero breaking changes.** Every edit is surgical. Rationale stated before any file is touched.
-
-2. **Privacy first, always.** Before adding any feature that touches data, ask: does this data leave the machine? If yes, do not ship it.
-
-3. **No CDN calls from webview.** Chart.js and all dependencies must be bundled locally into `webview/hud.js` at build time. CSP enforces this.
-
-4. **No file writes outside configured paths.** The only files Claude Lens writes are session reports in `reports.output_dir`. Nothing else. Ever.
-
-5. **No auto-updates to price table.** Pricing is updated manually via `scripts/updatePriceTable.ts` and committed. Never fetched at runtime.
-
-6. **VS Code FileSystemWatcher over chokidar.** chokidar is unreliable in VS Code extension host. Use `vscode.workspace.createFileSystemWatcher`.
-
-7. **Zod for all config validation.** Invalid `.claudelens` falls back to defaults — never crashes. User sees a single warning toast.
-
-8. **All async operations non-blocking.** File writes, JSONL reads, and report generation must never block the extension host thread.
-
-9. **Nudges are advisory, never modal.** ROI nudges appear as dismissable toasts only. Never interrupt workflow with a modal.
-
-10. **Test coverage for all three pillars.** `budgetEngine`, `roiScorer`, and `reportWriter` each require unit tests before Phase 1 ship. UI components do not require tests in Phase 1.
-
-11. **API key in SecretStorage only.** If user provides Anthropic API key for optional precise token counting, store only in `context.secrets`. Never in `globalState`, `workspaceState`, or `.claudelens`.
-
-12. **`.claudelens` contains no secrets.** The config file is designed to be safely committed to public repos. Document this explicitly in README.
-
----
-
-## 14. Phase Roadmap
-
-### Phase 1 — MVP (Ship this)
+### Phase 1 — MVP
 
 Target: working extension, publishable to marketplace.
 
@@ -975,39 +943,6 @@ Target: working extension, publishable to marketplace.
 - [ ] README with demo GIF
 - [ ] Marketplace listing
 
-**Phase 1 does NOT include:** HUD webview, ROI scorer, report writer, sidebar panel (basic version only)
-
----
-
-### Phase 2 — Differentiation
-
-- [ ] `roiScorer.ts` — heuristic model-fit engine
-- [ ] `reportWriter.ts` — standard markdown reports
-- [ ] Sidebar panel — full tree view with all five sections
-- [ ] ROI nudge toasts
-- [ ] Client billing mode (report format only)
-
----
-
-### Phase 3 — Polish + HUD
-
-- [ ] `hudWebview.ts` — floating panel
-- [ ] Chart.js burn rate sparkline
-- [ ] Session reset countdown ring
-- [ ] Weekly digest report
-- [ ] Manual provider fallback (for claude.ai-only users)
-
----
-
-### Phase 4 — Marketplace Growth
-
-- [ ] Open VSX publish (VSCodium, Gitpod)
-- [ ] `.claudelens` schema JSON published for editor autocomplete
-- [ ] CHANGELOG maintained per release
-- [ ] GitHub Discussions enabled
-- [ ] First 50 GitHub issues triaged and responded to
-
----
 
 ## 15. Competitive Differentiators
 
@@ -1028,4 +963,4 @@ What Claude Lens owns that no other VS Code extension has as of March 2026:
 
 *Claude Lens — built by Shouvik Mukherjee*  
 *Privacy-first. Local-only. Open source.*  
-*Last updated: 2026-03-31*
+*Last updated: 2026-04-02*
