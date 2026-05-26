@@ -71,15 +71,22 @@ suite('ModelSwitcher', () => {
     assert.strictEqual(obj['testProperty'], 'testValue', 'Other properties should be preserved');
   });
 
-  test('setModel with invalid model ID should still write', () => {
-    // The function doesn't validate model IDs — it just writes them
-    // This is OK because Claude Code will ignore invalid ones
+  test('setModel with invalid model ID should reject it', () => {
+    // Security fix: validate model IDs against AVAILABLE_MODELS before writing
     const invalidModel = 'gpt-4-turbo';
-    setModel(invalidModel);
-
     const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
-    const obj = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>;
-    assert.strictEqual(obj['model'], invalidModel, 'Invalid model should be written as-is');
+
+    // Set a known-good model first
+    setModel('claude-sonnet-4-6');
+    const before = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>;
+
+    // Try to set invalid model (should be silently rejected)
+    setModel(invalidModel);
+    const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>;
+
+    // File should be unchanged — invalid model not written
+    assert.strictEqual(after['model'], before['model'], 'Invalid model should be rejected, file unchanged');
+    assert.strictEqual(after['model'], 'claude-sonnet-4-6', 'Valid model should still be set');
   });
 
   test('getActiveModel returns set model', () => {

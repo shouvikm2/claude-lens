@@ -20,8 +20,9 @@ export interface RoiSummary {
   overallFit: 'good' | 'minor_overkill' | 'significant_overkill';
 }
 
-const ARCHITECTURE_WORDS = ['design', 'architect', 'system', 'refactor', 'migrate', 'infrastructure', 'scalab', 'restructure'];
-const SIMPLE_WORDS       = ['fix', 'typo', 'rename', 'format', 'lint', 'what is', 'explain briefly'];
+// Word boundaries required to avoid false matches (e.g., "suffix" contains "fix")
+const ARCHITECTURE_WORDS = /\b(design|architect|system|refactor|migrate|infrastructure|scalab|restructure|optimization|performance|analysis|algorithm)\b/i;
+const SIMPLE_WORDS       = /\b(fix|typo|rename|format|lint|explain|summarize|clarify|what is)\b/i;
 
 // Complexity → model tier thresholds (from spec)
 const TIER_THRESHOLDS: { min: number; tier: ModelTier }[] = [
@@ -29,6 +30,39 @@ const TIER_THRESHOLDS: { min: number; tier: ModelTier }[] = [
   { min: 31, tier: 'sonnet' },
   { min: 0,  tier: 'haiku' },
 ];
+
+/** Count code lines (non-empty, non-comment) as signal of complexity */
+function countCodeLines(text: string): number {
+  return text
+    .split('\n')
+    .filter(line => {
+      const trimmed = line.trim();
+      return trimmed.length > 0 && !trimmed.startsWith('//') && !trimmed.startsWith('#');
+    }).length;
+}
+
+/** Count actual multi-step instructions (numbered lists with content) */
+function countRealSteps(text: string): number {
+  // Match "N. <content>" patterns that are on separate lines (multi-step instructions)
+  // Avoid inline counters like "1. 2. 3." by requiring line breaks or substantial content after
+  const stepPattern = /\n\s*\d+\.\s+.{2,200}/g;
+  const matches = text.match(stepPattern);
+  return matches ? Math.min(matches.length, 15) : 0;
+}
+
+/** Estimate semantic complexity of fresh input (not cache) */
+function estimateFreshInputComplexity(promptText: string): number {
+  // Truncate to prevent ReDoS on very large inputs
+  const capped = promptText.length > 10_000 ? promptText.slice(0, 10_000) : promptText;
+  // Remove markdown code blocks by splitting on triple-backtick fences
+  const parts = capped.split('```');
+  // Keep only odd-indexed parts (outside code blocks)
+  const stripped = parts.filter((_, i) => i % 2 === 0).join(' ').toLowerCase();
+
+  const words = stripped.split(/\s+/).length;
+  // 0-10 words: trivial, 50+ words: complex narrative
+  return Math.min(words / 50, 1) * 15;
+}
 
 function scoreComplexity(
   promptText: string,
@@ -43,32 +77,59 @@ function scoreComplexity(
   // cache_read_input_tokens carries the full context window. Use total
   // effective context as the complexity signal.
   const effectiveInput = tokens.input + (tokens.cacheCreation ?? 0) + (tokens.cacheRead ?? 0);
+  const cacheRatio = tokens.cacheRead ? tokens.cacheRead / effectiveInput : 0;
 
-  // Effective context size — up to 25 pts
-  score += Math.min(effectiveInput / 50_000, 25);
+  // [IMPROVED] Effective context size — up to 25 pts
+  // Heavy cache reuse (>90%) gets modest boost: context is maintained but query is fresh.
+  // This avoids over-rewarding turns that reuse massive amounts of cached code.
+  if (cacheRatio > 0.9) {
+    score += Math.min(effectiveInput / 100_000, 15); // Dampen for high cache reuse
+  } else {
+    score += Math.min(effectiveInput / 50_000, 25); // Full signal for fresh context
+  }
 
-  // Short prompt penalty: only fires if the ENTIRE context (incl. cache) is tiny.
-  // A 2-token message with 1M cache reads is not a simple query.
-  if (effectiveInput < 500) score -= 15;
+  // [IMPROVED] Short fresh input penalty: only fires if NEW input (not cache) is tiny
+  // Previously: penalized any turn with < 500 total effective tokens
+  // Now: only penalize if fresh input is < 50 AND total context is < 500
+  // This avoids false positives like "continue debugging" + 10M cached code files
+  if (tokens.input < 50 && effectiveInput < 500) {
+    score -= 15;
+  }
 
-  // Architecture / complexity keywords in prompt
-  const lp = promptText.toLowerCase();
-  if (ARCHITECTURE_WORDS.some(w => lp.includes(w))) score += 15;
-  if (SIMPLE_WORDS.some(w => lp.includes(w)))       score -= 10;
+  // [IMPROVED] Architecture / complexity keywords — word boundaries + regex
+  // Previously: used .includes() which matched "suffix" for "fix", "platform" for "form"
+  // Now: use word boundary regex \b to avoid substring matches
+  if (ARCHITECTURE_WORDS.test(promptText)) score += 15;
+  if (SIMPLE_WORDS.test(promptText)) score -= 10;
 
-  // Code context estimate: count lines in prompt
-  const promptLines = (promptText.match(/\n/g) ?? []).length;
-  score += Math.min(promptLines / 20, 15);
+  // [IMPROVED] Code context estimate: count actual code lines (not just newlines)
+  // Previously: counted all newlines, including blank lines and comments
+  // Now: ignores empty lines and single-line comments (//, #)
+  const codeLines = countCodeLines(promptText);
+  score += Math.min(codeLines / 20, 15);
+
+  // [NEW] Fresh input semantic complexity (ignore boilerplate)
+  // Counts words in fresh prompt (not code blocks), scales 0-15 pts
+  // Distinguishes between trivial 2-word queries and complex 100-word narratives
+  score += estimateFreshInputComplexity(promptText);
 
   // Response token length — up to 20 pts
   score += Math.min(tokens.output / 100, 20);
 
-  // Multi-step response detection (numbered lists in response)
-  const numberedSteps = (responseText.match(/\d+\./g) ?? []).length;
-  score += Math.min(numberedSteps * 2, 10);
+  // [IMPROVED] Multi-step response detection (real instructions, not inline numbers)
+  // Previously: counted any "N." pattern, including inline numbers ("cost: $5. next: $10.")
+  // Now: only counts line-break delimited steps (structured multi-step responses)
+  const realSteps = countRealSteps(responseText);
+  score += Math.min(realSteps * 1, 10);
 
-  // Later turns in a session tend to be simpler follow-ups
-  if (turnIndex > 5) score -= 5;
+  // [IMPROVED] Later turn penalty: smoother decay curve
+  // Previously: flat -5 after turn 5
+  // Now: gradual -3 at turn 6-10, then -7 for 11+ (compound effect of follow-ups)
+  if (turnIndex > 10) {
+    score -= 7;
+  } else if (turnIndex > 5) {
+    score -= 3;
+  }
 
   return Math.max(0, Math.min(100, Math.round(score)));
 }

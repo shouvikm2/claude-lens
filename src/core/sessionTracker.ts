@@ -4,7 +4,6 @@ import { calculateCost } from '../utils/priceTable.js';
 import { log } from '../utils/logger.js';
 import type { JournalEntry } from '../providers/claudeCodeProvider.js';
 import type { PlanLimits } from '../providers/claudeAiLimitsProvider.js';
-
 const SESSION_WINDOW_HOURS = 5;
 
 export interface LastTurnQuotaUsage {

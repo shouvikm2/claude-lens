@@ -7,12 +7,21 @@ import type { JournalEntry } from './claudeCodeProvider.js';
 const SECRET_KEY = 'claudeLens.anthropicApiKey';
 const USAGE_HOST = 'api.anthropic.com';
 
-// ─── Anthropic Usage API response shapes ─────────────────────────────────────
-// GET https://api.anthropic.com/v1/usage
-// Returns per-model, per-day usage for the account tied to the API key.
+// ─── Anthropic API response shapes ───────────────────────────────────────────
+
+// GET /v1/models
+interface ModelObject {
+  id:           string;
+  display_name: string;
+  type:         string;
+}
+interface ModelsResponse {
+  data: ModelObject[];
+}
+
+// GET /v1/usage
 // Only available for API/Workspace billing accounts.
 // Claude Pro / Max subscription usage is NOT exposed via this endpoint.
-
 interface UsageDataPoint {
   model:                        string;
   input_tokens:                 number;
@@ -53,6 +62,51 @@ export class AnthropicUsageProvider {
 
   private async getApiKey(): Promise<string | undefined> {
     return this.context.secrets.get(SECRET_KEY);
+  }
+
+  // ── Models ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Fetches the live model list from GET /v1/models.
+   * Returns null if no API key is stored or the request fails.
+   */
+  async fetchModels(): Promise<Array<{ id: string; label: string }> | null> {
+    const key = await this.getApiKey();
+    if (!key) return null;
+
+    return new Promise(resolve => {
+      const options: https.RequestOptions = {
+        hostname: USAGE_HOST,
+        path:     '/v1/models',
+        method:   'GET',
+        headers: {
+          'x-api-key':         key,
+          'anthropic-version': '2023-06-01',
+          'content-type':      'application/json',
+        },
+      };
+
+      const req = https.request(options, res => {
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('end', () => {
+          if (res.statusCode !== 200) { resolve(null); return; }
+          try {
+            const parsed = JSON.parse(Buffer.concat(chunks).toString('utf-8')) as ModelsResponse;
+            const models = (parsed.data ?? [])
+              .filter(m => m.id.startsWith('claude-'))
+              .map(m => ({ id: m.id, label: m.display_name }));
+            resolve(models.length > 0 ? models : null);
+          } catch {
+            resolve(null);
+          }
+        });
+      });
+
+      req.on('error', () => resolve(null));
+      req.setTimeout(8_000, () => { req.destroy(); resolve(null); });
+      req.end();
+    });
   }
 
   // ── Fetch + ingest ─────────────────────────────────────────────────────────

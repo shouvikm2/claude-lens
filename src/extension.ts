@@ -15,7 +15,6 @@ import { getAvailableModels, setModel, clearModel, getActiveModel } from './core
 import { formatDuration } from './utils/formatter.js';
 import { loadPriceTable } from './utils/priceTable.js';
 import { log, disposeLogger } from './utils/logger.js';
-import { notifyTurnQuotaUsage } from './ui/notifications.js';
 import type { JournalEntry } from './providers/claudeCodeProvider.js';
 
 export type DataSource = 'claude-code-logs' | 'anthropic-api' | 'none';
@@ -91,7 +90,6 @@ export function activate(context: vscode.ExtensionContext): void {
     const state        = sessionTracker.getState();
     const config       = workspaceConfig.get();
     const budgetReport = budgetEngine.evaluate(state, config);
-    budgetEngine.alert(budgetReport, config);
     statusBar.update(state, budgetReport);
     sidebarProvider.update(state, budgetReport, config, sessionSummary(turnScores), activeDataSource);
   }
@@ -108,7 +106,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // ── Entry processing (shared by all providers) ────────────────────────────
 
-  function processEntry(entry: JournalEntry): void {
+  function processEntry(entry: JournalEntry, isHistorical = false): void {
     if (entry.type === 'user') {
       const content = (entry.message as Record<string, unknown>)['content'];
       if (typeof content === 'string') {
@@ -147,7 +145,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
       // Advisory nudge — never modal, respects cooldown
       const now = Date.now();
-      if (score.nudgeSuggestion && config.model_roi.nudge_on_overkill && now > nudgeCooldownUntil) {
+      if (!isHistorical && score.nudgeSuggestion && config.model_roi.nudge_on_overkill && now > nudgeCooldownUntil) {
         nudgeCooldownUntil = now + config.model_roi.nudge_cooldown_min * 60 * 1000;
         vscode.window
           .showInformationMessage(`⬡ ROI Nudge: ${score.nudgeSuggestion}`, 'Dismiss', "Don't Remind")
@@ -162,12 +160,10 @@ export function activate(context: vscode.ExtensionContext): void {
       // reflects actual usage rather than waiting up to 5 minutes.
       void limitsProvider.refreshNow();
 
-      // Calculate and display per-turn quota consumption
+      // Calculate per-turn quota consumption for sidebar display
       const limits = limitsProvider.getLastData();
       const turnQuota = sessionTracker.calculateTurnQuotaPercentage(limits || { session: undefined, weekly: undefined, subscriptionType: '' });
       if (turnQuota && limits?.session) {
-        notifyTurnQuotaUsage(turnQuota.pct, turnQuota.tokens, limits.session.pctUsed);
-        // Store in session state for sidebar display (SessionTracker handles this internally)
         sessionTracker.setLastTurnQuotaUsage(turnQuota);
       }
     }
@@ -179,7 +175,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const claudeProvider = new ClaudeCodeProvider();
 
-  claudeProvider.onEntry(entry => processEntry(entry));
+  claudeProvider.onEntry((entry, isHistorical) => processEntry(entry, isHistorical));
 
   // Provider tells us the REAL session start time from the first JSONL entry.
   // We use this — not extension activation time — to set the 5-hour window.
@@ -271,17 +267,20 @@ export function activate(context: vscode.ExtensionContext): void {
       statusBar.updateLimits(seed);
     }
     limitsProvider.startPolling(limits => {
-      sidebarProvider.updatePlanLimits(limits, limitsProvider.getLastError(), limitsProvider.getDataStalenessMs());
-      statusBar.updateLimits(limits);
-      if (!limits?.session) return;
+      // Graceful degradation: if current fetch failed, use cached data if available
+      const dataToDisplay = limits ?? limitsProvider.getLastData() ?? null;
+      const errorToDisplay = dataToDisplay ? undefined : limitsProvider.getLastError();
+      sidebarProvider.updatePlanLimits(dataToDisplay, errorToDisplay, limitsProvider.getDataStalenessMs());
+      statusBar.updateLimits(dataToDisplay);
+      if (!dataToDisplay?.session) return;
 
-      const sessionPct = Math.round(limits.session.pctUsed * 100);
-      const weeklyPct = limits.weekly ? Math.round(limits.weekly.pctUsed * 100) : undefined;
+      const sessionPct = Math.round(dataToDisplay.session.pctUsed * 100);
+      const weeklyPct = dataToDisplay.weekly ? Math.round(dataToDisplay.weekly.pctUsed * 100) : undefined;
 
-      // Fire once per threshold crossing (80%, 90%) — never re-alert same level
+      // Fire once per threshold crossing (75%, 90%) — never re-alert same level
       if (sessionPct >= 90 && lastSessionAlertPct < 90) {
         lastSessionAlertPct = 90;
-        const resetsIn = formatDuration(Math.max(0, limits.session.resetAt.getTime() - Date.now()));
+        const resetsIn = formatDuration(Math.max(0, dataToDisplay.session.resetAt.getTime() - Date.now()));
         const msg = weeklyPct !== undefined
           ? `⬡ Session at 90%, Weekly at ${weeklyPct}% — resets in ${resetsIn}`
           : `⬡ Claude session at 90% — resets in ${resetsIn}`;
@@ -292,12 +291,12 @@ export function activate(context: vscode.ExtensionContext): void {
               void vscode.env.openExternal(vscode.Uri.parse('https://claude.ai/settings/usage'));
             }
           });
-      } else if (sessionPct >= 80 && lastSessionAlertPct < 80) {
-        lastSessionAlertPct = 80;
-        const resetsIn = formatDuration(Math.max(0, limits.session.resetAt.getTime() - Date.now()));
+      } else if (sessionPct >= 75 && lastSessionAlertPct < 75) {
+        lastSessionAlertPct = 75;
+        const resetsIn = formatDuration(Math.max(0, dataToDisplay.session.resetAt.getTime() - Date.now()));
         const msg = weeklyPct !== undefined
-          ? `⬡ Session at 80%, Weekly at ${weeklyPct}% — resets in ${resetsIn}`
-          : `⬡ Claude session at 80% — resets in ${resetsIn}`;
+          ? `⬡ Session at 75%, Weekly at ${weeklyPct}% — resets in ${resetsIn}`
+          : `⬡ Claude session at 75% — resets in ${resetsIn}`;
         vscode.window
           .showInformationMessage(msg, 'View on claude.ai', 'Dismiss')
           .then(choice => {
@@ -438,9 +437,12 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('claudeLens.switchModel', async () => {
-      const models  = getAvailableModels();
-      const current = getActiveModel();
-      const items   = [
+      // Try to fetch the live model list; fall back to the hardcoded set.
+      const liveModels = await anthropicProvider.fetchModels();
+      const models     = liveModels ?? getAvailableModels();
+      const isLive     = liveModels !== null;
+      const current    = getActiveModel();
+      const items      = [
         ...models.map(m => ({
           label:       m.label,
           description: m.id === current ? '← active' : '',
@@ -449,8 +451,8 @@ export function activate(context: vscode.ExtensionContext): void {
         { label: 'Reset to default (Claude Code decides)', description: '', id: '' },
       ];
       const picked = await vscode.window.showQuickPick(items, {
-        title:        'Switch Claude Code model',
-        placeHolder:  'Select model — writes to ~/.claude/settings.json',
+        title:       `Switch Claude Code model${isLive ? ' (live from Anthropic)' : ''}`,
+        placeHolder: 'Select model — writes to ~/.claude/settings.json',
       });
       if (!picked) return;
       if (picked.id === '') {

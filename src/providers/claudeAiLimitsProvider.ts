@@ -53,7 +53,22 @@ export class ClaudeAiLimitsProvider {
 
     try {
       const raw = await fs.promises.readFile(credPath, 'utf-8');
-      this.creds = JSON.parse(raw) as CredentialFile;
+      const parsed: unknown = JSON.parse(raw);
+
+      // Runtime shape validation — don't trust the file blindly
+      if (
+        !parsed || typeof parsed !== 'object' ||
+        !('claudeAiOauth' in parsed) ||
+        !parsed.claudeAiOauth || typeof parsed.claudeAiOauth !== 'object' ||
+        !('accessToken' in parsed.claudeAiOauth) ||
+        typeof parsed.claudeAiOauth.accessToken !== 'string'
+      ) {
+        this.lastError = 'Credentials file has unexpected shape (missing claudeAiOauth.accessToken)';
+        log(`ClaudeAiLimitsProvider: ${this.lastError}`);
+        return false;
+      }
+
+      this.creds = parsed as CredentialFile;
       this.lastCredsFetch = Date.now();
       const ok = !!this.creds.claudeAiOauth?.accessToken;
       log(`ClaudeAiLimitsProvider: credentials loaded — ok=${ok}`);
@@ -67,21 +82,27 @@ export class ClaudeAiLimitsProvider {
     }
   }
 
-  private async checkCredentialsFilePermissions(credPath: string): Promise<void> {
+  /**
+   * Check credentials file permissions. On Unix/macOS, warns if group/other
+   * can read the file and returns false to indicate the risk.
+   * On Windows, permissions can't be checked reliably — always returns true.
+   */
+  private async checkCredentialsFilePermissions(credPath: string): Promise<boolean> {
     try {
+      if (process.platform === 'win32') return true;
+
       const stat = await fs.promises.stat(credPath);
-      // On Unix/Linux: file mode should be 0o600 (user read/write only)
-      // File permissions: mode & 0o777 extracts the permission bits
-      // We check if group/other have any permissions: (mode & 0o077) should be 0
       const mode = stat.mode & 0o777;
       const hasGroupOrOtherPerms = (mode & 0o077) !== 0;
 
       if (hasGroupOrOtherPerms) {
         log(`[WARNING] Credentials file has overly permissive permissions (${mode.toString(8)}). ` +
-            `Recommended: chmod 600 ~/.claude/.credentials.json`);
+            `Recommended: chmod 600 ~/.claude/.credentials.json. Proceeding anyway but this is a security risk.`);
       }
+      return true;
     } catch {
-      // Silently ignore on Windows or if stat fails (can't check permissions reliably)
+      // Can't check permissions — allow load to proceed
+      return true;
     }
   }
 
@@ -175,7 +196,12 @@ export class ClaudeAiLimitsProvider {
     const backoffDelays = [30_000, 30_000, 90_000, 90_000];
 
     const schedule = (delayMs: number) => {
-      this.pollTimer = setTimeout(() => void tick(), delayMs);
+      this.pollTimer = setTimeout(() => {
+        tick().catch(err => {
+          const msg = err instanceof Error ? err.message : String(err);
+          log(`[ERROR] Poll tick failed: ${msg}`);
+        });
+      }, delayMs);
     };
 
     const tick = async () => {

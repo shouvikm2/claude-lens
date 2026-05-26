@@ -94,4 +94,88 @@ suite('RoiScorer', () => {
       assert.strictEqual(summary.overallFit, 'significant_overkill');
     }
   });
+
+  // Tests for heuristic improvements
+  test('word boundary matching: "suffix" does not trigger "fix" keyword', () => {
+    // Test with a prompt containing "suffix" and a larger response to get meaningful score
+    const result = scoreTurn(
+      'add suffix to strings in this utility function',
+      'Here is the modified function that adds a suffix:\n1. First get the input\n2. Then process it\n3. Return result',
+      'claude-sonnet-4-6',
+      TOKENS_LARGE,
+      1,
+      cfg()
+    );
+    // Should NOT have a -10 penalty for simple keyword (score would be ~10 lower if it did)
+    // Without the penalty, context + output + steps should be >= 20
+    assert.ok(result.complexityScore >= 25, `Expected score >= 25 (no simple penalty), got ${result.complexityScore}`);
+  });
+
+  test('high cache reuse dampens context score', () => {
+    // Use larger context to show the dampening effect (both need substantial input to show difference)
+    const withoutCache = { input: 100000, output: 500, cacheCreation: 0, cacheRead: 0 };
+    const withHighCache = { input: 10000, output: 500, cacheCreation: 0, cacheRead: 91000 };
+
+    const noCache = scoreTurn('complex question about system design', 'answer', 'claude-sonnet-4-6', withoutCache, 1, cfg());
+    const highCache = scoreTurn('complex question about system design', 'answer', 'claude-sonnet-4-6', withHighCache, 1, cfg());
+
+    // With high cache (>91% reuse), context contribution is dampened
+    // noCache: 100k/50k = 2 pts, highCache: 101k/100k = 1 pt → 1 pt difference
+    assert.ok(
+      highCache.complexityScore <= noCache.complexityScore,
+      `Expected high cache score (${highCache.complexityScore}) <= fresh score (${noCache.complexityScore})`
+    );
+  });
+
+  test('numbered inline costs do not count as multi-step instructions', () => {
+    const costResponse = 'Option 1: $5. Option 2: $10. Option 3: $15. Choose wisely.';
+    const stepResponse = '1. First step here\n2. Second step here\n3. Third step here';
+
+    const costResult = scoreTurn('compare options', costResponse, 'claude-sonnet-4-6', TOKENS_MEDIUM, 1, cfg());
+    const stepResult = scoreTurn('build system', stepResponse, 'claude-sonnet-4-6', TOKENS_MEDIUM, 1, cfg());
+
+    // Step response should score higher (real multi-step instructions)
+    assert.ok(
+      stepResult.complexityScore >= costResult.complexityScore,
+      `Expected step score (${stepResult.complexityScore}) >= cost score (${costResult.complexityScore})`
+    );
+  });
+
+  test('later turns get graduated penalty (not flat)', () => {
+    const turn6 = scoreTurn('question', 'answer', 'claude-sonnet-4-6', TOKENS_MEDIUM, 6, cfg());
+    const turn11 = scoreTurn('question', 'answer', 'claude-sonnet-4-6', TOKENS_MEDIUM, 11, cfg());
+    const turn15 = scoreTurn('question', 'answer', 'claude-sonnet-4-6', TOKENS_MEDIUM, 15, cfg());
+
+    // Each step further in the session should lower score
+    assert.ok(
+      turn11.complexityScore < turn6.complexityScore,
+      `Expected turn 11 (${turn11.complexityScore}) < turn 6 (${turn6.complexityScore})`
+    );
+    assert.ok(
+      turn15.complexityScore <= turn11.complexityScore,
+      `Expected turn 15 (${turn15.complexityScore}) <= turn 11 (${turn11.complexityScore})`
+    );
+  });
+
+  test('minimal fresh input with huge cache does not get simple penalty', () => {
+    const hugeCache = { input: 10, output: 500, cacheCreation: 0, cacheRead: 1_000_000 };
+    const result = scoreTurn('continue', 'answer', 'claude-opus-4-6', hugeCache, 1, cfg());
+
+    // Should NOT have -15 penalty because fresh input is 10 tokens but total effective is > 500
+    // (The penalty only fires if BOTH input < 50 AND effectiveInput < 500)
+    assert.ok(result.complexityScore >= 15, `Expected score >= 15 (no simple penalty), got ${result.complexityScore}`);
+  });
+
+  test('semantic complexity: short narrative vs single words', () => {
+    const trivial = 'hi';
+    const narrative = 'I need to refactor the authentication system to support OAuth2, implement PKCE flow, and ensure backward compatibility with existing sessions';
+
+    const trivialResult = scoreTurn(trivial, 'sure', 'claude-sonnet-4-6', TOKENS_SMALL, 1, cfg());
+    const narrativeResult = scoreTurn(narrative, 'I recommend...', 'claude-sonnet-4-6', TOKENS_MEDIUM, 1, cfg());
+
+    assert.ok(
+      narrativeResult.complexityScore > trivialResult.complexityScore,
+      `Expected narrative (${narrativeResult.complexityScore}) > trivial (${trivialResult.complexityScore})`
+    );
+  });
 });

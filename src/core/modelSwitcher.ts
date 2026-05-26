@@ -8,9 +8,12 @@ const SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
 // Models available to Pro/Max Claude Code users.
 // Claude Code routes to these via ~/.claude/settings.json "model" key.
 const AVAILABLE_MODELS = [
-  { id: 'claude-sonnet-4-6',          label: 'Sonnet 4.6  (default — balanced)' },
-  { id: 'claude-opus-4-6',            label: 'Opus 4.6    (most capable, slower)' },
-  { id: 'claude-haiku-4-5-20251001',  label: 'Haiku 4.5   (fastest, lightest tasks)' },
+  { id: 'claude-opus-4-7',           label: 'Opus 4.7    (most capable)' },
+  { id: 'claude-sonnet-4-6',         label: 'Sonnet 4.6  (default — balanced)' },
+  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5   (fastest, lightest tasks)' },
+  { id: 'claude-opus-4-6',          label: 'Opus 4.6' },
+  { id: 'claude-3-opus-20240229',    label: 'Opus 3' },
+  { id: 'claude-sonnet-4-5',        label: 'Sonnet 4.5' },
 ] as const;
 
 export type ModelId = typeof AVAILABLE_MODELS[number]['id'];
@@ -27,6 +30,11 @@ export function getActiveModel(): string | undefined {
 }
 
 export function setModel(modelId: string): void {
+  if (!modelId.startsWith('claude-')) {
+    log(`ModelSwitcher: rejected invalid modelId "${modelId}"`);
+    return;
+  }
+
   let obj: Record<string, unknown> = {};
   try {
     if (fs.existsSync(SETTINGS_PATH)) {

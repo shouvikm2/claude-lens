@@ -20,7 +20,7 @@ export interface JournalEntry {
   };
 }
 
-type EntryCallback       = (entry: JournalEntry) => void;
+type EntryCallback       = (entry: JournalEntry, isHistorical: boolean) => void;
 type SessionStartCallback = (startTime: Date) => void;
 type SessionEndCallback   = () => void;
 
@@ -148,7 +148,7 @@ export class ClaudeCodeProvider {
       }
 
       for (const entry of entries) {
-        this.onEntryCallback?.(entry);
+        this.onEntryCallback?.(entry, /* isHistorical */ true);
       }
       log(`Loaded ${entries.length} entries from ${path.basename(filePath)}`);
     } catch (err) {
@@ -195,7 +195,7 @@ export class ClaudeCodeProvider {
           .filter((e): e is JournalEntry => e !== undefined);
 
         for (const entry of newEntries) {
-          this.onEntryCallback?.(entry);
+          this.onEntryCallback?.(entry, /* isHistorical */ false);
         }
         if (newEntries.length > 0) {
           log(`Tailed ${newEntries.length} new entries from ${path.basename(filePath)}`);
@@ -295,8 +295,10 @@ export class ClaudeCodeProvider {
         if (!line.trim()) continue;
         try {
           const obj = JSON.parse(line) as Record<string, unknown>;
-          const cwd = (obj['cwd'] as string | undefined)?.replace(/\\/g, '/').toLowerCase();
-          if (cwd && (cwd === normalizedCwd || cwd.startsWith(normalizedCwd))) return true;
+          const rawCwd = obj['cwd'];
+          if (typeof rawCwd !== 'string') continue;
+          const cwd = rawCwd.replace(/\\/g, '/').toLowerCase();
+          if (cwd === normalizedCwd || cwd.startsWith(normalizedCwd)) return true;
         } catch {
           // Expected: some lines may be malformed; skip and continue scanning
         }

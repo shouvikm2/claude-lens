@@ -10,6 +10,7 @@ const CONFIG_FILENAME = '.claudelens';
 export class WorkspaceConfig {
   private config: ClensConfig = DEFAULT_CONFIG;
   private watcher: vscode.FileSystemWatcher | undefined;
+  private debounceTimer: NodeJS.Timeout | undefined;
   private readonly changeEmitter = new vscode.EventEmitter<ClensConfig>();
 
   readonly onDidChange = this.changeEmitter.event;
@@ -32,8 +33,25 @@ export class WorkspaceConfig {
   }
 
   dispose(): void {
+    if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this.watcher?.dispose();
     this.changeEmitter.dispose();
+  }
+
+  /** Debounce rapid file-change events (e.g., editor save + formatter) */
+  private debouncedReload(overridePath?: string): void {
+    if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    this.debounceTimer = setTimeout(() => {
+      const configPath = overridePath ?? this.resolveConfigPath();
+      if (configPath) {
+        log('.claudelens changed — reloading (debounced)');
+        this.readAndParse(configPath).then(() => {
+          this.changeEmitter.fire(this.config);
+        }).catch(err => {
+          logError('Failed to reload .claudelens', err);
+        });
+      }
+    }, 300);
   }
 
   private resolveConfigPath(): string | undefined {
@@ -73,19 +91,12 @@ export class WorkspaceConfig {
       new vscode.RelativePattern(folders[0], CONFIG_FILENAME)
     );
 
-    this.watcher.onDidChange(async () => {
-      log('.claudelens changed — reloading');
-      const configPath = this.resolveConfigPath();
-      if (configPath) {
-        await this.readAndParse(configPath);
-        this.changeEmitter.fire(this.config);
-      }
+    this.watcher.onDidChange(() => {
+      this.debouncedReload();
     });
 
-    this.watcher.onDidCreate(async (uri) => {
-      log('.claudelens created');
-      await this.readAndParse(uri.fsPath);
-      this.changeEmitter.fire(this.config);
+    this.watcher.onDidCreate((uri) => {
+      this.debouncedReload(uri.fsPath);
     });
 
     this.watcher.onDidDelete(() => {
